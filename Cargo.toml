@@ -1,0 +1,51 @@
+[package]
+name = "sill-windows"
+version = "0.1.0"
+edition = "2021"
+description = "A Windows host for the Sill iPad and iPhone app"
+license = "Apache-2.0"
+
+[lib]
+name = "sill_windows"
+path = "src/lib.rs"
+
+[[bin]]
+name = "SillHost"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+qrcode = { version = "0.14", default-features = false }
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Gdi",
+  "Win32_Media_MediaFoundation",
+  "Win32_NetworkManagement_Dns",
+  "Win32_Security_Cryptography",
+  "Win32_System_Com",
+  "Win32_System_Console",
+  "Win32_System_Variant",
+  "Win32_System_SystemInformation",
+  "Win32_System_StationsAndDesktops",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_HiDpi",
+] }
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
