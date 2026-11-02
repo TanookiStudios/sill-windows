@@ -25,7 +25,8 @@ You do this part by hand because downloading needs your GitHub sign-in, which on
 1. On the Windows PC, open a web browser and go to
    **https://github.com/TanookiStudios/sill-windows/actions**.
    If GitHub asks you to sign in, sign in as TanookiStudios.
-2. You'll see a list of builds. Click the top one that has a **green check mark** next to it.
+2. You'll see a list of builds. Click the top one named **Build** that has a **green check mark**
+   next to it.
 3. Scroll down to the section called **Artifacts**. Click **SillHost-windows**.
    A file called `SillHost-windows.zip` downloads.
 4. Open your **Downloads** folder. Right-click `SillHost-windows.zip` and choose **Extract All…**,

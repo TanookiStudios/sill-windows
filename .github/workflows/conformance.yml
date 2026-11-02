@@ -1,0 +1,46 @@
+name: Conformance (macOS)
+
+# Started by hand (Actions > Conformance (macOS) > Run workflow): GitHub's Mac machines are often
+# too busy to take the job, and a job they never start would mark every build as failed. The same
+# checks run locally with the commands in README.md ("For developers").
+on:
+  workflow_dispatch:
+
+jobs:
+  conformance:
+    # Builds Sill's own Swift protocol code and checks this host against it: the bytes both ways,
+    # then a real device-side run over Apple's Network.framework (the TLS stack the iPad uses) and
+    # Sill's own Python test client against this host.
+    name: Conformance against Sill's Swift code
+    runs-on: macos-latest
+    env:
+      SILL_COMMIT: 52dbbde
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch Sill (the reference)
+        run: |
+          git clone --quiet https://github.com/Saffsanity/sill.git "$RUNNER_TEMP/sill"
+          git -C "$RUNNER_TEMP/sill" checkout --quiet "$SILL_COMMIT"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Swift fixtures, fresh from Sill's code, against the Rust side
+        run: |
+          cd conformance
+          SILL_PATH="$RUNNER_TEMP/sill" swift run -q SillConformance dump "$RUNNER_TEMP/fixtures"
+          cd ..
+          SWIFT_FIXTURES="$RUNNER_TEMP/fixtures" cargo test --test conformance
+      - name: Rust output, decoded by Sill's code
+        run: cd conformance && SILL_PATH="$RUNNER_TEMP/sill" swift run -q SillConformance check ../tests/fixtures/rust
+      - name: End to end over Network.framework and with Sill's own test client
+        run: |
+          cargo build
+          export SILL_HOME="$RUNNER_TEMP/home" SILL_TEST_CODE_FILE="$RUNNER_TEMP/code.txt" SILL_TEST_LINK_FILE="$RUNNER_TEMP/link.txt"
+          ./target/debug/SillHost --port 17455 > "$RUNNER_TEMP/host.log" 2>&1 &
+          sleep 2
+          (cd conformance && SILL_PATH="$RUNNER_TEMP/sill" swift run -q SillConformance dial 17455 "$SILL_TEST_CODE_FILE")
+          sleep 1
+          python3 "$RUNNER_TEMP/sill/Scripts/sillclient.py" 17455 3 desktop --identity="$RUNNER_TEMP/py" --pair-ask \
+            --pair-url="$(cat "$SILL_TEST_LINK_FILE")" --hello=1.0 --expect-pair=ok
+      - name: Host log
+        if: always()
+        run: grep -v "107m" "$RUNNER_TEMP/host.log" || true
