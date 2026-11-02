@@ -193,7 +193,7 @@ fn print_qr(text: &str) {
 }
 
 fn pc_name() -> String {
-    let n = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_default();
+    let n = mdns::host_name().or_else(|| std::env::var("COMPUTERNAME").ok()).or_else(|| std::env::var("HOSTNAME").ok()).unwrap_or_default();
     let n = protocol::safe_label(&n, 64);
     if n.is_empty() { "Windows PC".into() } else { n }
 }

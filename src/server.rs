@@ -63,6 +63,10 @@ impl Hub {
         self.keyframe_wanted.store(true, Ordering::SeqCst);
     }
 
+    pub fn keyframe_pending(&self) -> bool {
+        self.keyframe_wanted.load(Ordering::SeqCst)
+    }
+
     /// The encoder asks before each frame: should this one be a keyframe?
     pub fn take_keyframe_request(&self) -> bool {
         self.keyframe_wanted.swap(false, Ordering::SeqCst)

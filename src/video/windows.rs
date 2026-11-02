@@ -96,10 +96,9 @@ impl Pipeline {
             .map_err(err("the graphics device didn't start"))?;
             let device = device.ok_or("no graphics device")?;
             let context = context.ok_or("no graphics context")?;
-            // The encoder uses the device from its own threads.
-            if let Ok(mt) = device.cast::<ID3D11Multithread>() {
-                let _ = mt.SetMultithreadProtected(TRUE);
-            }
+            // The encoder uses the device from its own threads: Direct3D must lock around every call.
+            let mt: ID3D11Multithread = context.cast().map_err(err("Direct3D multithread protection"))?;
+            let _ = mt.SetMultithreadProtected(TRUE);
 
             let output1: IDXGIOutput1 = output.cast().map_err(err("this Windows can't capture the screen"))?;
             let duplication = output1.DuplicateOutput(&device).map_err(err(
@@ -107,11 +106,19 @@ impl Pipeline {
             ))?;
             let dd = duplication.GetDesc();
             let (dw, dh) = (dd.ModeDesc.Width, dd.ModeDesc.Height);
+            // A display turned to portrait delivers its image as the panel scans it out: turn it back.
+            let turn = match dd.Rotation {
+                DXGI_MODE_ROTATION_ROTATE90 => Some(D3D11_VIDEO_PROCESSOR_ROTATION_270),
+                DXGI_MODE_ROTATION_ROTATE180 => Some(D3D11_VIDEO_PROCESSOR_ROTATION_180),
+                DXGI_MODE_ROTATION_ROTATE270 => Some(D3D11_VIDEO_PROCESSOR_ROTATION_90),
+                _ => None,
+            };
+            let (uw, uh) = if matches!(dd.Rotation, DXGI_MODE_ROTATION_ROTATE90 | DXGI_MODE_ROTATION_ROTATE270) { (dh, dw) } else { (dw, dh) };
 
             // The picture: the desktop, scaled down so its longer side is at most max_side, even sizes.
-            let scale = (settings.max_side as f64 / dw.max(dh) as f64).min(1.0);
-            let width = ((dw as f64 * scale) as u32) & !1;
-            let height = ((dh as f64 * scale) as u32) & !1;
+            let scale = (settings.max_side as f64 / uw.max(uh) as f64).min(1.0);
+            let width = ((uw as f64 * scale) as u32) & !1;
+            let height = ((uh as f64 * scale) as u32) & !1;
 
             let desktop = texture(&device, dw, dh, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_RENDER_TARGET)?;
             let video_device: ID3D11VideoDevice = device.cast().map_err(err("no video processor"))?;
@@ -132,6 +139,9 @@ impl Pipeline {
             video_context.VideoProcessorSetStreamColorSpace(&processor, 0, &D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 });
             video_context.VideoProcessorSetOutputColorSpace(&processor, &D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: (1 << 2) | (1 << 4) });
             video_context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
+            if let Some(turn) = turn {
+                video_context.VideoProcessorSetStreamRotation(&processor, 0, true, turn);
+            }
             let mut input_view = None;
             video_device
                 .CreateVideoProcessorInputView(
@@ -170,7 +180,7 @@ impl Pipeline {
                 mbps: (bitrate / 1_000_000) as i64,
                 on_virtual_display: false,
             });
-            println!("Streaming the screen: {dw}×{dh} as {width}×{height} at up to {} fps, HEVC on {}.", settings.fps, encoder.name);
+            println!("Streaming the screen: {uw}×{uh} as {width}×{height} at up to {} fps, HEVC on {}.", settings.fps, encoder.name);
             Ok(Pipeline {
                 _device: device, context, duplication, desktop, video_context, processor,
                 input_view: input_view.ok_or("video processor input")?, surfaces, next_surface: 0, encoder,
@@ -186,6 +196,7 @@ impl Pipeline {
         let mut have_image = false;
         let mut dirty = false;
         let mut timestamp: i64 = 0;
+        let mut waiting_since: Option<Instant> = None;
         while hub.client_count() > 0 {
             // 1. A new desktop image, if there is one (waits up to 4 ms).
             unsafe {
@@ -211,6 +222,15 @@ impl Pipeline {
             // 2. What the encoder said meanwhile.
             unsafe { self.encoder.pump(hub)? };
             // 3. Encode, when there is something to send and the encoder takes input.
+            // An encoder that stops asking for input while a frame waits has failed (a driver reset
+            // can do that without a word): start again rather than freeze the picture.
+            if have_image && (dirty || hub.keyframe_pending()) && self.encoder.wants_input == 0 {
+                if waiting_since.get_or_insert_with(Instant::now).elapsed() > Duration::from_secs(2) {
+                    return Err("the encoder stopped taking frames".into());
+                }
+            } else {
+                waiting_since = None;
+            }
             if have_image && self.encoder.wants_input > 0 && Instant::now() >= next_slot {
                 let key = hub.take_keyframe_request();
                 if dirty || key {
@@ -306,7 +326,22 @@ struct Encoder {
     /// The latest VPS, SPS and PPS, for a keyframe that comes without them.
     parameter_sets: Option<Vec<Vec<u8>>>,
     name: String,
+    activate: IMFActivate,
     _manager: IMFDXGIDeviceManager,
+}
+
+impl Drop for Encoder {
+    /// Asynchronous encoders must be shut down before release, or the hardware session can outlive
+    /// them (and consumer GPUs allow only a few at once).
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+            if let Ok(s) = self.transform.cast::<IMFShutdown>() {
+                let _ = s.Shutdown();
+            }
+            let _ = self.activate.ShutdownObject();
+        }
+    }
 }
 
 const NEED_INPUT: u32 = 601; // METransformNeedInput
@@ -355,10 +390,13 @@ impl Encoder {
                 Ok((transform, events, codec, provides_samples, output_size)) => {
                     return Ok(Encoder {
                         transform, events, codec, wants_input: 0, provides_samples, output_size,
-                        parameter_sets: None, name, _manager: manager,
+                        parameter_sets: None, name, activate: activate.clone(), _manager: manager,
                     })
                 }
-                Err(e) => problems.push(format!("{name}: {e}")),
+                Err(e) => {
+                    let _ = activate.ShutdownObject();
+                    problems.push(format!("{name}: {e}"));
+                }
             }
         }
         Err(format!("no HEVC encoder would start ({})", problems.join("; ")))
@@ -378,6 +416,25 @@ impl Encoder {
         let _ = attributes.SetUINT32(&MF_LOW_LATENCY, 1);
         transform.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize).map_err(err("Direct3D"))?;
 
+        // Real time: no B-frames, low latency, a steady rate, a keyframe only when asked (or every 4
+        // s). Set before the media types, which some encoders read them at. One that refuses a
+        // setting still works, at its own default, which the log says.
+        let codec = transform.cast::<ICodecAPI>().ok();
+        if let Some(c) = &codec {
+            let refused: Vec<&str> = [
+                ("low latency", c.SetValue(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true))),
+                ("no B-frames", c.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &VARIANT::from(0u32))),
+                ("keyframe interval", c.SetValue(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(fps * 4))),
+                ("constant bitrate", c.SetValue(&CODECAPI_AVEncCommonRateControlMode, &VARIANT::from(eAVEncCommonRateControlMode_CBR.0 as u32))),
+                ("bitrate", c.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bitrate))),
+            ]
+            .into_iter()
+            .filter_map(|(what, r)| r.is_err().then_some(what))
+            .collect();
+            if !refused.is_empty() {
+                println!("({} kept its own settings for: {}.)", friendly_name(activate), refused.join(", "));
+            }
+        }
         let size = ((width as u64) << 32) | height as u64;
         let rate = ((fps as u64) << 32) | 1;
         let out = MFCreateMediaType().map_err(err("media type"))?;
@@ -402,15 +459,6 @@ impl Encoder {
         color(&inp);
         transform.SetInputType(0, &inp, 0).map_err(err("the encoder refused the picture format"))?;
 
-        // Real time: no B-frames, low latency, a steady rate, a keyframe only when asked (or every 4 s).
-        let codec = transform.cast::<ICodecAPI>().ok();
-        if let Some(c) = &codec {
-            let _ = c.SetValue(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true));
-            let _ = c.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &VARIANT::from(0u32));
-            let _ = c.SetValue(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(fps * 4));
-            let _ = c.SetValue(&CODECAPI_AVEncCommonRateControlMode, &VARIANT::from(eAVEncCommonRateControlMode_CBR.0 as u32));
-            let _ = c.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bitrate));
-        }
         let info = transform.GetOutputStreamInfo(0).map_err(err("output stream"))?;
         let provides = info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0 as u32) != 0;
         transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0).map_err(err("start"))?;
@@ -428,7 +476,11 @@ impl Encoder {
                 Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => return Ok(()),
                 Err(e) => return Err(format!("the encoder stopped: {e}")),
             };
+            if let Ok(status) = event.GetStatus() {
+                status.ok().map_err(err("the encoder reported a failure"))?;
+            }
             match event.GetType().map_err(err("encoder event"))? {
+                t if t == MEError.0 as u32 => return Err("the encoder reported an error".into()),
                 NEED_INPUT => self.wants_input += 1,
                 HAVE_OUTPUT => self.output(hub)?,
                 _ => {}
@@ -478,6 +530,9 @@ impl Encoder {
                 let t = self.transform.GetOutputAvailableType(0, 0).map_err(err("encoder format"))?;
                 self.transform.SetOutputType(0, &t, 0).map_err(err("encoder format"))?;
                 self.parameter_sets = None;
+                let info = self.transform.GetOutputStreamInfo(0).map_err(err("output stream"))?;
+                self.provides_samples = info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0 as u32) != 0;
+                self.output_size = info.cbSize.max(1 << 20);
                 return Ok(());
             }
             Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(()),
