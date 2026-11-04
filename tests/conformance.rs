@@ -245,6 +245,23 @@ fn write_rust_fixtures() {
     let mut eld = sill_windows::audio::Eld::new().unwrap();
     let pcm: Vec<i16> = (0..sill_windows::audio::FRAMES * 2).map(|i| ((i as f32 / 40.0).sin() * 8000.0) as i16).collect();
     let packet = (0..4).filter_map(|_| eld.encode(&pcm)).last().unwrap();
+    // A second of a 440 Hz tone, for a one-off decode with Apple's decoder.
+    let mut tone = sill_windows::audio::Eld::new().unwrap();
+    let mut packets = Vec::new();
+    for block in 0..100usize {
+        let pcm: Vec<i16> = (0..sill_windows::audio::FRAMES)
+            .flat_map(|i| {
+                let t = (block * sill_windows::audio::FRAMES + i) as f64 / 48_000.0;
+                let v = ((t * 440.0 * std::f64::consts::TAU).sin() * 9830.0) as i16;
+                [v, v]
+            })
+            .collect();
+        if let Some(p) = tone.encode(&pcm) {
+            packets.extend_from_slice(&(p.len() as u16).to_be_bytes());
+            packets.extend_from_slice(&p);
+        }
+    }
+    w("audio_tone.packets", packets);
     w("audio_format.bin", sill_windows::audio::format_message(7, &eld.cookie, eld.priming));
     w("audio_packet.bin", sill_windows::audio::packet_message(7, 9, true, &packet, TS));
     w("clipboard_out.bin", json(kind::CLIPBOARD, &p::Clipboard { text: Some("Hé".into()), stop: None }));

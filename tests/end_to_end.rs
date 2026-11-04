@@ -469,9 +469,8 @@ async fn catalog_and_clipboard_on_windows() {
     assert!(events.contains("state Minimized"), "minimize");
     assert!(events.contains("closed"), "close");
     // It closed: the next list drops it and the stream goes back to the Desktop.
-    seen.remove(&kind::WINDOW_LIST);
     gather(&mut s, 2.5, &mut seen).await;
-    let list: serde_json::Value = serde_json::from_slice(seen.get(&kind::WINDOW_LIST).expect("a new list").last().unwrap()).unwrap();
+    let list: serde_json::Value = serde_json::from_slice(seen[&kind::WINDOW_LIST].last().unwrap()).unwrap();
     assert!(list["active"].get("desktop").is_some(), "back to the Desktop: {}", list["active"]);
     let _ = window.kill();
 }

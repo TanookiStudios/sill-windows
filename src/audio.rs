@@ -91,12 +91,25 @@ impl Drop for Eld {
     }
 }
 
+/// The magic cookie as Apple's decoder takes it: the AudioSpecificConfig inside an MPEG-4 elementary
+/// stream descriptor, laid out as Apple's own AAC-ELD encoder writes it (a bare config is refused).
+pub fn apple_cookie(config: &[u8]) -> Vec<u8> {
+    fn descriptor(tag: u8, body: &[u8]) -> Vec<u8> {
+        [&[tag, 0x80, 0x80, 0x80, body.len() as u8][..], body].concat()
+    }
+    let decoder_info = descriptor(5, config);
+    // MPEG-4 audio, audio stream, a 6 KB buffer, 128 kbps at most and on average.
+    let decoder_config = descriptor(4, &[&[0x40, 0x14, 0x00, 0x18, 0x00, 0x00, 0x01, 0xf4, 0x00, 0x00, 0x01, 0xf4, 0x00][..], &decoder_info].concat());
+    let sync = descriptor(6, &[2]);
+    descriptor(3, &[&[0, 0, 0][..], &decoder_config, &sync].concat())
+}
+
 /// Kind 43, type 1: how to decode what follows.
 pub fn format_message(epoch: u16, cookie: &[u8], priming: u32) -> Vec<u8> {
     use base64::Engine;
     let f = serde_json::json!({
         "codec": "aac-eld", "sampleRate": RATE, "channels": 2, "framesPerPacket": FRAMES, "primingFrames": priming,
-        "bitrate": BITRATE, "epoch": epoch, "cookie": base64::engine::general_purpose::STANDARD.encode(cookie), "source": "desktop",
+        "bitrate": BITRATE, "epoch": epoch, "cookie": base64::engine::general_purpose::STANDARD.encode(apple_cookie(cookie)), "source": "desktop",
     });
     let mut d = vec![1u8];
     d.extend_from_slice(&serde_json::to_vec(&f).unwrap_or_default());
@@ -317,6 +330,15 @@ mod tests {
         assert!(packets.len() >= 18, "{} packets", packets.len());
         let average = packets.iter().map(|p| p.len()).sum::<usize>() / packets.len();
         assert!((100..260).contains(&average), "about 160 bytes at 128 kbps: {average}");
+    }
+
+    #[test]
+    fn cookie_is_apples() {
+        // Written by Apple's AudioConverter for 48 kHz stereo AAC-ELD at 480 frames and 128 kbps.
+        let apple = "0380808024000000048080801640140018000001f4000001f4000580808004f8e65000068080800102";
+        let mine: String = apple_cookie(&[0xf8, 0xe6, 0x50, 0x00]).iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(mine, apple);
+        assert_eq!(Eld::new().unwrap().cookie, [0xf8, 0xe6, 0x50, 0x00], "the same config as Apple's encoder");
     }
 
     #[test]
