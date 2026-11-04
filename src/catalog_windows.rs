@@ -39,6 +39,38 @@ unsafe fn program(h: HWND) -> Option<String> {
     Some(String::from_utf16_lossy(&b[..n as usize]))
 }
 
+/// The name a program gives itself ("Google Chrome"), else its file's name, capitalized.
+fn app_name(path: &str) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::*;
+    if path.is_empty() {
+        return None;
+    }
+    let description = unsafe {
+        let wide = HSTRING::from(path);
+        let size = GetFileVersionInfoSizeW(&wide, None);
+        let mut data = vec![0u8; size as usize];
+        let mut found = None;
+        if size > 0 && GetFileVersionInfoW(&wide, 0, size, data.as_mut_ptr() as *mut _).is_ok() {
+            let (mut p, mut n) = (std::ptr::null_mut(), 0u32);
+            // The first language the file lists, as (language, code page) pairs.
+            if VerQueryValueW(data.as_ptr() as *const _, w!("\\VarFileInfo\\Translation"), &mut p, &mut n).as_bool() && n >= 4 {
+                let t = std::slice::from_raw_parts(p as *const u16, 2);
+                let key = HSTRING::from(format!("\\StringFileInfo\\{:04x}{:04x}\\FileDescription", t[0], t[1]));
+                if VerQueryValueW(data.as_ptr() as *const _, &key, &mut p, &mut n).as_bool() && n > 1 {
+                    let units = std::slice::from_raw_parts(p as *const u16, n as usize - 1);
+                    found = Some(String::from_utf16_lossy(units).trim_end_matches('\0').trim().to_string());
+                }
+            }
+        }
+        found
+    };
+    description.filter(|d| !d.is_empty()).or_else(|| {
+        let stem = std::path::Path::new(path).file_stem()?.to_string_lossy().to_string();
+        let mut c = stem.chars();
+        Some(c.next()?.to_uppercase().collect::<String>() + c.as_str())
+    })
+}
+
 /// The visible part of a window on the desktop, without the invisible resize border.
 pub fn bounds(id: u32) -> Option<RECT> {
     unsafe {
@@ -80,18 +112,18 @@ pub fn windows() -> Vec<WindowInfo> {
                 continue;
             }
             let id = h.0 as usize as u32;
-            let mut r = RECT::default();
-            if GetWindowRect(h, &mut r).is_err() {
+            // Its normal size, so a minimized window stays listed with its real one.
+            let mut place = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+            if GetWindowPlacement(h, &mut place).is_err() {
                 continue;
             }
+            let r = place.rcNormalPosition;
             let (width, height) = ((r.right - r.left) as i64, (r.bottom - r.top) as i64);
             if width < 100 || height < 50 {
                 continue;
             }
             let path = program(h).unwrap_or_default();
-            let stem = std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-            let mut name = stem.chars();
-            let app_name = name.next().map(|c| c.to_uppercase().collect::<String>() + name.as_str()).unwrap_or_else(|| title.clone());
+            let app_name = app_name(&path).unwrap_or_else(|| title.clone());
             out.push(WindowInfo { id, title, app_name, bundle_id: path, width, height });
         }
     }
