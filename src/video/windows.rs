@@ -72,7 +72,7 @@ pub fn check_capture() {
 
 /// One desktop image from a plain Direct3D device, with none of the video parts.
 unsafe fn capture_one_image() -> Result<String> {
-    let (adapter, output, _) = main_output()?;
+    let (adapter, output, _) = find_output(None)?;
     let mut device = None;
     let mut context = None;
     D3D11CreateDevice(
@@ -140,7 +140,13 @@ fn offset(c: RECT, m: RECT) -> RECT {
 impl Pipeline {
     fn new(settings: &Settings, hub: &Hub, rect: &Mutex<Rect>) -> Result<Pipeline> {
         unsafe {
-            let (adapter, output, desc) = main_output()?;
+            // A window streams from whichever monitor holds its middle.
+            let source = hub.source.lock().unwrap().clone();
+            let wanted_bounds = match source {
+                crate::protocol::StreamSource::Window { id } => crate::catalog::platform::bounds(id),
+                _ => None,
+            };
+            let (adapter, output, desc) = find_output(wanted_bounds.map(|b| ((b.left + b.right) / 2, (b.top + b.bottom) / 2)))?;
             let r = desc.DesktopCoordinates;
             *rect.lock().unwrap() = Rect { left: r.left, top: r.top, width: r.right - r.left, height: r.bottom - r.top };
 
@@ -174,8 +180,8 @@ impl Pipeline {
             let (mut uw, mut uh) = if matches!(dd.Rotation, DXGI_MODE_ROTATION_ROTATE90 | DXGI_MODE_ROTATION_ROTATE270) { (dh, dw) } else { (dw, dh) };
             // A window streams as its part of the screen (not on a turned display, or one mostly off this monitor).
             let mut window = None;
-            if let (crate::protocol::StreamSource::Window { id }, None) = (hub.source.lock().unwrap().clone(), turn) {
-                if let Some(c) = crate::catalog::platform::bounds(id).map(|b| clip(b, r)).filter(|c| c.right - c.left >= 64 && c.bottom - c.top >= 64) {
+            if let (crate::protocol::StreamSource::Window { id }, None) = (source, turn) {
+                if let Some(c) = wanted_bounds.map(|b| clip(b, r)).filter(|c| c.right - c.left >= 64 && c.bottom - c.top >= 64) {
                     uw = (c.right - c.left) as u32;
                     uh = (c.bottom - c.top) as u32;
                     *rect.lock().unwrap() = Rect { left: c.left, top: c.top, width: c.right - c.left, height: c.bottom - c.top };
@@ -440,8 +446,9 @@ unsafe fn texture(device: &ID3D11Device, w: u32, h: u32, format: DXGI_FORMAT, bi
     t.ok_or_else(|| "couldn't make a video surface".to_string())
 }
 
-/// The monitor whose top-left corner is the desktop's origin: Windows' main display.
-unsafe fn main_output() -> Result<(IDXGIAdapter1, IDXGIOutput, DXGI_OUTPUT_DESC)> {
+/// The monitor holding `point`, else the one whose top-left corner is the desktop's origin:
+/// Windows' main display.
+unsafe fn find_output(point: Option<(i32, i32)>) -> Result<(IDXGIAdapter1, IDXGIOutput, DXGI_OUTPUT_DESC)> {
     let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(err("DXGI didn't start"))?;
     let mut first = None;
     let mut a = 0;
@@ -450,11 +457,14 @@ unsafe fn main_output() -> Result<(IDXGIAdapter1, IDXGIOutput, DXGI_OUTPUT_DESC)
         while let Ok(output) = adapter.EnumOutputs(o) {
             let desc = output.GetDesc().map_err(err("display description"))?;
             if desc.AttachedToDesktop.as_bool() {
-                let RECT { left, top, .. } = desc.DesktopCoordinates;
-                if left == 0 && top == 0 {
-                    return Ok((adapter, output, desc));
+                let d = desc.DesktopCoordinates;
+                if let Some((x, y)) = point {
+                    if x >= d.left && x < d.right && y >= d.top && y < d.bottom {
+                        return Ok((adapter, output, desc));
+                    }
                 }
-                if first.is_none() {
+                let main = d.left == 0 && d.top == 0;
+                if main || first.is_none() {
                     first = Some((adapter.clone(), output, desc));
                 }
             }

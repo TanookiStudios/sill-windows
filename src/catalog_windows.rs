@@ -11,6 +11,28 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+/// Monitors other than the main one are listed like windows, from this ID up.
+const DISPLAY_BASE: u32 = 0xFFFF_0000;
+
+unsafe extern "system" fn add_monitor(_: HMONITOR, _: HDC, r: *mut RECT, list: LPARAM) -> BOOL {
+    (*(list.0 as *mut Vec<RECT>)).push(*r);
+    TRUE
+}
+
+/// The extra monitors' rectangles, in Windows' order, the main one left out.
+fn displays() -> Vec<RECT> {
+    let mut all: Vec<RECT> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(add_monitor), LPARAM(&mut all as *mut _ as isize));
+    }
+    all.retain(|r| r.left != 0 || r.top != 0);
+    all
+}
+
+fn display(id: u32) -> Option<RECT> {
+    id.checked_sub(DISPLAY_BASE).and_then(|i| displays().get(i as usize).copied())
+}
+
 fn hwnd(id: u32) -> HWND {
     HWND(id as usize as *mut _)
 }
@@ -73,6 +95,9 @@ fn app_name(path: &str) -> Option<String> {
 
 /// The visible part of a window on the desktop, without the invisible resize border.
 pub fn bounds(id: u32) -> Option<RECT> {
+    if id >= DISPLAY_BASE {
+        return display(id);
+    }
     unsafe {
         let h = hwnd(id);
         if !IsWindow(h).as_bool() || IsIconic(h).as_bool() {
@@ -127,6 +152,16 @@ pub fn windows() -> Vec<WindowInfo> {
             out.push(WindowInfo { id, title, app_name, bundle_id: path, width, height });
         }
     }
+    for (i, r) in displays().iter().enumerate() {
+        out.push(WindowInfo {
+            id: DISPLAY_BASE + i as u32,
+            title: format!("Display {}", i + 2),
+            app_name: "Displays".into(),
+            bundle_id: "sill:display".into(),
+            width: (r.right - r.left) as i64,
+            height: (r.bottom - r.top) as i64,
+        });
+    }
     out
 }
 
@@ -149,11 +184,15 @@ fn header(w: i32, h: i32) -> BITMAPINFO {
 pub fn thumbnail(id: u32) -> Option<Vec<u8>> {
     unsafe {
         let h = hwnd(id);
-        if IsIconic(h).as_bool() {
+        let shown = display(id);
+        if shown.is_none() && IsIconic(h).as_bool() {
             return None;
         }
         let mut r = RECT::default();
-        GetWindowRect(h, &mut r).ok()?;
+        match shown {
+            Some(d) => r = d,
+            None => GetWindowRect(h, &mut r).ok()?,
+        }
         let (w, ht) = (r.right - r.left, r.bottom - r.top);
         if w <= 0 || ht <= 0 {
             return None;
@@ -167,7 +206,12 @@ pub fn thumbnail(id: u32) -> Option<Vec<u8>> {
         if let Ok(bmp) = bmp {
             let old = SelectObject(dc, bmp);
             // 2: PW_RENDERFULLCONTENT, which also catches GPU-drawn windows such as browsers.
-            if PrintWindow(h, dc, PRINT_WINDOW_FLAGS(2)).as_bool() && !bits.is_null() {
+            let drawn = if shown.is_some() {
+                BitBlt(dc, 0, 0, w, ht, screen, r.left, r.top, SRCCOPY).is_ok()
+            } else {
+                PrintWindow(h, dc, PRINT_WINDOW_FLAGS(2)).as_bool()
+            };
+            if drawn && !bits.is_null() {
                 let px = std::slice::from_raw_parts(bits as *const u8, w as usize * ht as usize * 4);
                 out = super::thumbnail_jpeg(px, w as usize, ht as usize, 480);
             }
@@ -181,6 +225,9 @@ pub fn thumbnail(id: u32) -> Option<Vec<u8>> {
 }
 
 pub fn icon(path: &str) -> Option<Vec<u8>> {
+    if path == "sill:display" {
+        return None;
+    }
     unsafe {
         let mut info = SHFILEINFOW::default();
         let wide = HSTRING::from(path);
@@ -262,6 +309,9 @@ pub fn launch(path: &str) -> bool {
 
 /// Brings a window forward, since a window streams by showing it on the screen.
 pub fn focus(id: u32) {
+    if id >= DISPLAY_BASE {
+        return;
+    }
     unsafe {
         let h = hwnd(id);
         if IsIconic(h).as_bool() {
@@ -276,6 +326,9 @@ pub fn focus(id: u32) {
 }
 
 pub fn command(id: u32, action: &str) {
+    if id >= DISPLAY_BASE {
+        return;
+    }
     unsafe {
         let h = hwnd(id);
         match action {
@@ -296,6 +349,9 @@ pub fn command(id: u32, action: &str) {
 /// Sizes a window so its content suits the device's panel (the Aa control), in Windows' logical
 /// pixels, kept on the main monitor.
 pub fn fit(id: u32, width: f64, height: f64) {
+    if id >= DISPLAY_BASE {
+        return;
+    }
     unsafe {
         let h = hwnd(id);
         let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(h).max(96) as f64;
