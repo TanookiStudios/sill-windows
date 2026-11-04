@@ -733,7 +733,8 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
 
 /// A device's text scale for a window: the window takes the panel's size at that scale.
 fn fit_to_viewport(host: &Host, id: u32) {
-    if let Some(p::Viewport { width, height, scale: Some(s) }) = host.hub.viewport.lock().unwrap().clone() {
+    let viewport = host.hub.viewport.lock().unwrap().clone();
+    if let Some(p::Viewport { width, height, scale: Some(s) }) = viewport {
         crate::catalog::platform::fit(id, width / s, height / s);
     }
 }

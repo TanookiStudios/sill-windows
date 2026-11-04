@@ -185,7 +185,8 @@ pub fn thumbnail(id: u32) -> Option<Vec<u8>> {
     unsafe {
         let h = hwnd(id);
         let shown = display(id);
-        if shown.is_none() && IsIconic(h).as_bool() {
+        // A frozen program would never answer the drawing request, and hold up every other thumbnail.
+        if shown.is_none() && (IsIconic(h).as_bool() || IsHungAppWindow(h).as_bool()) {
             return None;
         }
         let mut r = RECT::default();
@@ -354,6 +355,9 @@ pub fn fit(id: u32, width: f64, height: f64) {
     }
     unsafe {
         let h = hwnd(id);
+        if IsHungAppWindow(h).as_bool() {
+            return; // resizing waits on the program, and a frozen one never answers
+        }
         let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(h).max(96) as f64;
         let (sw, sh) = (GetSystemMetrics(SM_CXMAXIMIZED) as f64, GetSystemMetrics(SM_CYMAXIMIZED) as f64);
         let (w, ht) = ((width * dpi / 96.0).clamp(320.0, sw), (height * dpi / 96.0).clamp(240.0, sh));
