@@ -179,7 +179,15 @@ impl Pipeline {
             };
             let processor_enum = video_device.CreateVideoProcessorEnumerator(&content).map_err(err("no video processor"))?;
             let processor = video_device.CreateVideoProcessor(&processor_enum, 0).map_err(err("no video processor"))?;
-            // Full-range RGB in; BT.709 limited-range YCbCr out, which the encoder's stream says too.
+            // Without a destination rectangle a stream writes nothing at all (Microsoft's default is an
+            // empty one), and the encoder would happily encode blank surfaces.
+            let whole = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
+            video_context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&whole));
+            video_context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&whole));
+            video_context.VideoProcessorSetStreamFrameFormat(&processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+            // Full-range RGB in; BT.709 limited-range YCbCr out. The stream itself leaves its colors
+            // unspecified, as Chromium's does (setting them on the encoder has crashed AMD drivers),
+            // which a decoder reads as BT.709 at HD sizes and up.
             video_context.VideoProcessorSetStreamColorSpace(&processor, 0, &D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 });
             video_context.VideoProcessorSetOutputColorSpace(&processor, &D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: (1 << 2) | (1 << 4) });
             video_context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
@@ -200,7 +208,10 @@ impl Pipeline {
                 .map_err(err("video processor input"))?;
             let mut surfaces = Vec::new();
             for _ in 0..8 {
-                let t = texture(&device, width, height, DXGI_FORMAT_NV12, D3D11_BIND_RENDER_TARGET)?;
+                // Some drivers want to be told a surface feeds the encoder; older ones don't know the flag.
+                let to_encoder = D3D11_BIND_FLAG(D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_VIDEO_ENCODER.0);
+                let t = texture(&device, width, height, DXGI_FORMAT_NV12, to_encoder)
+                    .or_else(|_| texture(&device, width, height, DXGI_FORMAT_NV12, D3D11_BIND_RENDER_TARGET))?;
                 let mut view = None;
                 video_device
                     .CreateVideoProcessorOutputView(
@@ -241,6 +252,8 @@ impl Pipeline {
         let mut dirty = false;
         let mut timestamp: i64 = 0;
         let mut waiting_since: Option<Instant> = None;
+        // A keyframe asked of the encoder, and how many had come out by then.
+        let mut key_asked: Option<(Instant, u64)> = None;
         while hub.wanted() {
             // 1. A new desktop image, if there is one (waits up to 4 ms).
             unsafe {
@@ -278,17 +291,34 @@ impl Pipeline {
             if have_image && self.encoder.wants_input > 0 && Instant::now() >= next_slot {
                 let key = hub.take_keyframe_request();
                 if dirty || key {
-                    self.encode(timestamp, key)?;
-                    timestamp += 10_000_000 / self.fps as i64;
-                    dirty = false;
+                    if self.encode(timestamp, key)? {
+                        timestamp += 10_000_000 / self.fps as i64;
+                        dirty = false;
+                        if key {
+                            key_asked = Some((Instant::now(), hub.keyframes.load(Ordering::SeqCst)));
+                        }
+                    } else if key {
+                        hub.request_keyframe(); // refused this time: the frame goes in again
+                    }
                     next_slot = (next_slot + interval).max(Instant::now());
+                }
+            }
+            // Hardware encoders can drop a frame without a word, and on a still screen nothing else
+            // would ever ask again: a device would stay blank.
+            if let Some((at, count)) = key_asked {
+                if hub.keyframes.load(Ordering::SeqCst) > count {
+                    key_asked = None;
+                } else if at.elapsed() > Duration::from_millis(500) {
+                    hub.request_keyframe();
+                    key_asked = None;
                 }
             }
         }
         Ok(())
     }
 
-    fn encode(&mut self, timestamp: i64, keyframe: bool) -> Result<()> {
+    /// Whether the encoder took the frame.
+    fn encode(&mut self, timestamp: i64, keyframe: bool) -> Result<bool> {
         unsafe {
             let (surface, view) = &self.surfaces[self.next_surface];
             self.next_surface = (self.next_surface + 1) % self.surfaces.len();
@@ -309,6 +339,7 @@ impl Pipeline {
             let blt = self.video_context.VideoProcessorBlt(&self.processor, view, 0, &streams);
             ManuallyDrop::drop(&mut streams[0].pInputSurface);
             blt.map_err(err("color conversion"))?;
+            self.context.Flush(); // the encoder reads the surface from another thread
             self.encoder.encode(surface, timestamp, 10_000_000 / self.fps as i64, keyframe)
         }
     }
@@ -401,34 +432,12 @@ impl Encoder {
 
         let input = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_NV12 };
         let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_HEVC };
-        let mut list: *mut Option<IMFActivate> = std::ptr::null_mut();
-        let mut count = 0u32;
-        MFTEnumEx(
-            MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
-            Some(&input), Some(&output), &mut list, &mut count,
-        )
-        .map_err(err("couldn't list the HEVC encoders"))?;
-        let activates: Vec<IMFActivate> =
-            if list.is_null() { vec![] } else { std::slice::from_raw_parts_mut(list, count as usize).iter_mut().filter_map(|a| a.take()).collect() };
-        if !list.is_null() {
-            CoTaskMemFree(Some(list as _));
-        }
+        let activates = list_encoders(adapter, &input, &output);
         if activates.is_empty() {
             return Err("this PC's graphics chip has no hardware HEVC (H.265) encoder, which Sill needs".into());
         }
-        let luid = adapter.GetDesc1().map(|d| d.AdapterLuid).ok();
         let mut problems = Vec::new();
-        // The encoder on the capturing graphics chip first (on a laptop with two, the other can't use its surfaces).
-        let mut ordered: Vec<&IMFActivate> = activates.iter().collect();
-        ordered.sort_by_key(|a| {
-            let on_adapter = a.GetBlobSize(&MFT_ENUM_ADAPTER_LUID).is_ok() && {
-                let mut b = [0u8; 8];
-                a.GetBlob(&MFT_ENUM_ADAPTER_LUID, &mut b, None).is_ok()
-                    && luid.map(|l| b == [l.LowPart.to_le_bytes(), (l.HighPart as u32).to_le_bytes()].concat()[..]).unwrap_or(false)
-            };
-            !on_adapter
-        });
-        for activate in ordered {
+        for activate in &activates {
             let name = friendly_name(activate);
             match Self::configure(activate, &manager, width, height, fps, bitrate) {
                 Ok((transform, events, codec, provides_samples, output_size)) => {
@@ -464,21 +473,20 @@ impl Encoder {
         // s). Set before the media types, which some encoders read them at. One that refuses a
         // setting still works, at its own default, which the log says.
         let codec = transform.cast::<ICodecAPI>().ok();
-        if let Some(c) = &codec {
-            let refused: Vec<&str> = [
-                ("low latency", c.SetValue(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true))),
-                ("no B-frames", c.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &VARIANT::from(0u32))),
-                ("keyframe interval", c.SetValue(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(fps * 4))),
+        let apply = || -> Vec<&'static str> {
+            let Some(c) = &codec else { return vec![] };
+            [
                 ("constant bitrate", c.SetValue(&CODECAPI_AVEncCommonRateControlMode, &VARIANT::from(eAVEncCommonRateControlMode_CBR.0 as u32))),
                 ("bitrate", c.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bitrate))),
+                ("no B-frames", c.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &VARIANT::from(0u32))),
+                ("keyframe interval", c.SetValue(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(fps * 4))),
+                ("low latency", c.SetValue(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true))),
             ]
             .into_iter()
             .filter_map(|(what, r)| r.is_err().then_some(what))
-            .collect();
-            if !refused.is_empty() {
-                crate::say!("({} kept its own settings for: {}.)", friendly_name(activate), refused.join(", "));
-            }
-        }
+            .collect()
+        };
+        apply();
         let size = ((width as u64) << 32) | height as u64;
         let rate = ((fps as u64) << 32) | 1;
         let out = MFCreateMediaType().map_err(err("media type"))?;
@@ -490,7 +498,6 @@ impl Encoder {
         out.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1).map_err(err("output type"))?;
         out.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32).map_err(err("output type"))?;
         out.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH265VProfile_Main_420_8.0 as u32).map_err(err("output type"))?;
-        color(&out);
         transform.SetOutputType(0, &out, 0).map_err(err("the encoder refused the HEVC format"))?;
 
         let inp = MFCreateMediaType().map_err(err("media type"))?;
@@ -500,8 +507,28 @@ impl Encoder {
         inp.SetUINT64(&MF_MT_FRAME_RATE, rate).map_err(err("input type"))?;
         inp.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1).map_err(err("input type"))?;
         inp.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32).map_err(err("input type"))?;
-        color(&inp);
-        transform.SetInputType(0, &inp, 0).map_err(err("the encoder refused the picture format"))?;
+        if let Err(first) = transform.SetInputType(0, &inp, 0) {
+            // Some encoders take only a type they handed out themselves.
+            let mut taken = false;
+            for i in 0..64 {
+                let Ok(t) = transform.GetInputAvailableType(0, i) else { break };
+                if t.GetGUID(&MF_MT_SUBTYPE).ok() == Some(MFVideoFormat_NV12) {
+                    t.SetUINT64(&MF_MT_FRAME_SIZE, size).map_err(err("input type"))?;
+                    t.SetUINT64(&MF_MT_FRAME_RATE, rate).map_err(err("input type"))?;
+                    taken = transform.SetInputType(0, &t, 0).is_ok();
+                    break;
+                }
+            }
+            if !taken {
+                return Err(format!("the encoder refused the picture format: {first}"));
+            }
+        }
+        // Again, for encoders that only take these once both types are set; what they still
+        // refuse, they keep at their own default, and the log says so.
+        let refused = apply();
+        if !refused.is_empty() {
+            crate::say!("({} kept its own settings for: {}.)", friendly_name(activate), refused.join(", "));
+        }
 
         let info = transform.GetOutputStreamInfo(0).map_err(err("output stream"))?;
         let provides = info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0 as u32) != 0;
@@ -532,25 +559,27 @@ impl Encoder {
         }
     }
 
-    unsafe fn encode(&mut self, surface: &ID3D11Texture2D, time: i64, duration: i64, keyframe: bool) -> Result<()> {
+    /// Whether it took the frame: an encoder may turn input down even after asking for it.
+    unsafe fn encode(&mut self, surface: &ID3D11Texture2D, time: i64, duration: i64, keyframe: bool) -> Result<bool> {
         if keyframe {
             if let Some(c) = &self.codec {
                 let _ = c.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(1u32));
             }
         }
         let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, surface, 0, BOOL(0)).map_err(err("encoder input"))?;
-        if let Ok(b2) = buffer.cast::<IMF2DBuffer>() {
-            if let Ok(len) = b2.GetContiguousLength() {
-                let _ = buffer.SetCurrentLength(len);
-            }
-        }
+        buffer.SetCurrentLength(buffer.GetMaxLength().map_err(err("encoder input"))?).map_err(err("encoder input"))?;
         let sample = MFCreateSample().map_err(err("encoder input"))?;
         sample.AddBuffer(&buffer).map_err(err("encoder input"))?;
         sample.SetSampleTime(time).map_err(err("encoder input"))?;
         sample.SetSampleDuration(duration).map_err(err("encoder input"))?;
-        self.transform.ProcessInput(0, &sample, 0).map_err(err("the encoder refused a frame"))?;
-        self.wants_input = self.wants_input.saturating_sub(1);
-        Ok(())
+        match self.transform.ProcessInput(0, &sample, 0) {
+            Ok(()) => {
+                self.wants_input = self.wants_input.saturating_sub(1);
+                Ok(true)
+            }
+            Err(e) if e.code() == MF_E_NOTACCEPTING => Ok(false),
+            Err(e) => Err(format!("the encoder refused a frame: {e}")),
+        }
     }
 
     /// Takes one encoded access unit and sends it to every device.
@@ -621,12 +650,40 @@ impl Encoder {
     }
 }
 
-/// BT.709, limited range: what the video processor writes and what the device should decode.
-unsafe fn color(t: &IMFMediaType) {
-    let _ = t.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32);
-    let _ = t.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32);
-    let _ = t.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32);
-    let _ = t.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32);
+/// The hardware HEVC encoders of this graphics chip (on a laptop with two, the other can't use its
+/// surfaces). Falls back to every encoder where Windows can't filter by chip.
+unsafe fn list_encoders(adapter: &IDXGIAdapter1, input: &MFT_REGISTER_TYPE_INFO, output: &MFT_REGISTER_TYPE_INFO) -> Vec<IMFActivate> {
+    let flags = MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+    let collect = |list: *mut Option<IMFActivate>, count: u32| -> Vec<IMFActivate> {
+        if list.is_null() {
+            return vec![];
+        }
+        let v = std::slice::from_raw_parts_mut(list, count as usize).iter_mut().filter_map(|a| a.take()).collect();
+        CoTaskMemFree(Some(list as _));
+        v
+    };
+    let mut attributes = None;
+    if let (Ok(desc), Ok(())) = (adapter.GetDesc1(), MFCreateAttributes(&mut attributes, 1)) {
+        if let Some(a) = attributes {
+            let luid = [desc.AdapterLuid.LowPart.to_le_bytes(), (desc.AdapterLuid.HighPart as u32).to_le_bytes()].concat();
+            let mut list = std::ptr::null_mut();
+            let mut count = 0u32;
+            if a.SetBlob(&MFT_ENUM_ADAPTER_LUID, &luid).is_ok()
+                && MFTEnum2(MFT_CATEGORY_VIDEO_ENCODER, flags, Some(input), Some(output), &a, &mut list, &mut count).is_ok()
+            {
+                let v = collect(list, count);
+                if !v.is_empty() {
+                    return v;
+                }
+            }
+        }
+    }
+    let mut list = std::ptr::null_mut();
+    let mut count = 0u32;
+    match MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, flags, Some(input), Some(output), &mut list, &mut count) {
+        Ok(()) => collect(list, count),
+        Err(_) => vec![],
+    }
 }
 
 unsafe fn friendly_name(a: &IMFActivate) -> String {

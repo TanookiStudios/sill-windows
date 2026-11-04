@@ -130,8 +130,10 @@ are not in it yet:
 ## What has been tested, and how
 
 **Nobody has run this on a real PC with a real iPad yet.** One piece is still unproven anywhere: the
-step on the PC's graphics chip that turns the screen into HEVC video. It needs a real graphics chip,
-so its first real run will be on your PC. `MORNING.md` is the test sheet for that.
+step on the PC's graphics chip that turns the captured screen into HEVC video (the color conversion
+and the hardware encoder). It needs a real graphics chip, so its first real run will be on your PC.
+Two independent reviews compared that code with Microsoft's documentation and with Chromium, FFmpeg
+and others, and fixed what they found. `MORNING.md` is the test sheet.
 
 Everything else has run for real:
 
