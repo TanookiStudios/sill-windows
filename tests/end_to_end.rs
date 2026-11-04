@@ -323,3 +323,155 @@ async fn input_lands_on_windows() {
     assert!(lines.iter().any(|l| l.starts_with("wheel ") && l[6..].parse::<i32>().unwrap() > 0), "wheel forward");
     assert_eq!(typed, "Hé 😀D ", "text, Backspace, Command-A as Ctrl-A, an arrow and a Shift key");
 }
+
+/// The rest of a real desktop: the window list, thumbnails, icons, apps, the clipboard both ways, a
+/// held key repeating, the PC's own pointer, and window commands, read back from Windows itself.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn catalog_and_clipboard_on_windows() {
+    if std::env::var_os("SILL_E2E_INPUT").is_none() {
+        return;
+    }
+    use std::collections::HashMap;
+    let dir = scratch();
+    let (home, code_file, port) = (dir.join("home"), dir.join("code.txt"), 19_000 + (std::process::id() % 1000) as u16);
+    let _host = start(&home, port, &code_file);
+    let device = Device::new();
+    let (_, pc_key) = device.dial(port, b"sill-pair/1").await.unwrap();
+    let key = code_key(&std::fs::read_to_string(&code_file).unwrap(), &pc_key);
+    let k = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &key);
+    let proof = ring::hmac::sign(&k, &[b"sill-pair-v1 device\0".as_slice(), &device.fp, &pc_key].concat()).as_ref().to_vec();
+    let mut paired = false;
+    for _ in 0..20 {
+        let (mut s, _) = device.dial(port, b"sill-pair/1").await.unwrap();
+        if pair_request(&mut s, "code", &proof).await.ok {
+            paired = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(paired, "paired");
+
+    let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/windows_probe.ps1");
+    let mut window = Command::new("powershell")
+        .args(["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&probe).arg("-Dir").arg(&dir)
+        .spawn().unwrap();
+    let place = dir.join("where.json");
+    let end = Instant::now() + Duration::from_secs(30);
+    while !place.exists() && Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let w: serde_json::Value = serde_json::from_slice(&std::fs::read(&place).expect("the probe window opened")).unwrap();
+    let n = |k: &str| w[k].as_f64().unwrap();
+    let (sw, sh) = (n("screenW"), n("screenH"));
+
+    let (mut s, _) = device.dial(port, b"sill/1").await.unwrap();
+    let mut seen: HashMap<u8, Vec<Vec<u8>>> = HashMap::new();
+    async fn gather<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(s: &mut S, seconds: f64, seen: &mut HashMap<u8, Vec<Vec<u8>>>) {
+        let end = Instant::now() + Duration::from_secs_f64(seconds);
+        while Instant::now() < end {
+            // Pings four times a second, as a device, so held keys go on repeating.
+            s.write_all(&p::message(kind::PING, p::now(), false, &[0; 8])).await.unwrap();
+            s.flush().await.unwrap();
+            let until = Instant::now() + Duration::from_millis(100);
+            while let Ok(Ok((h, payload))) = tokio::time::timeout(until.saturating_duration_since(Instant::now()), read(s)).await {
+                if h.kind != kind::TICK && h.kind != kind::PONG {
+                    seen.entry(h.kind).or_default().push(payload);
+                }
+            }
+        }
+    }
+    gather(&mut s, 6.0, &mut seen).await;
+
+    // The list, with this window in it.
+    let lists = seen.get(&kind::WINDOW_LIST).expect("a window list");
+    let list: serde_json::Value = serde_json::from_slice(lists.last().unwrap()).unwrap();
+    println!("windows: {}", list["windows"]);
+    let me = list["windows"].as_array().unwrap().iter().find(|w| w["title"] == "Sill input probe").expect("the probe window is listed");
+    let id = me["id"].as_u64().unwrap() as u32;
+    assert!(me["bundleID"].as_str().unwrap().to_lowercase().ends_with("powershell.exe"), "{me}");
+    assert_eq!((list["gestures"].as_i64(), list["clipboard"].as_i64(), list["keyRepeat"].as_i64()), (Some(1), Some(1), Some(1)));
+    let thumbs = seen.get(&kind::THUMBNAIL).expect("thumbnails");
+    let mine = thumbs.iter().find(|t| t[..4] == id.to_be_bytes()).expect("a thumbnail of the probe window");
+    assert_eq!(&mine[4..6], &[0xFF, 0xD8], "a JPEG");
+    let icons = seen.get(&kind::APP_ICON).expect("icons");
+    assert!(icons.iter().any(|i| { let n = u16::from_be_bytes([i[0], i[1]]) as usize; i[2 + n..].starts_with(&[0x89, b'P', b'N', b'G']) }), "a PNG icon");
+    let apps: serde_json::Value = serde_json::from_slice(&seen[&kind::APP_LIST][0]).unwrap();
+    println!("{} apps listed, {} icons, {} thumbnails", apps.as_array().unwrap().len(), icons.len(), thumbs.len());
+    assert!(seen.contains_key(&kind::MAC_INFO), "kind 18");
+
+    // The clipboard, a device's text landing on Windows.
+    let powershell = |script: &str| Command::new("powershell").args(["-NoProfile", "-STA", "-Command", script]).output().unwrap();
+    s.write_all(&p::message(kind::CLIPBOARD, p::now(), false, br#"{"text":"from the device \u00e9"}"#)).await.unwrap();
+    s.flush().await.unwrap();
+    gather(&mut s, 0.6, &mut seen).await;
+    let text = String::from_utf8_lossy(&powershell("[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard").stdout).trim().to_string();
+    assert_eq!(text, "from the device é", "the device's text is on Windows' clipboard");
+    gather(&mut s, 0.6, &mut seen).await;
+    assert!(!seen.contains_key(&kind::CLIPBOARD), "a device's own text isn't sent back to it");
+    // And a copy on Windows reaching the device.
+    powershell("Set-Clipboard -Value 'copied on the PC'");
+    gather(&mut s, 1.2, &mut seen).await;
+    let copied: serde_json::Value = serde_json::from_slice(&seen.get(&kind::CLIPBOARD).expect("the copy came")[0]).unwrap();
+    assert_eq!(copied["text"], "copied on the PC");
+
+    // A held key repeats, at Windows' own rate, and stops at its up.
+    let pointer = |action: &str, x: f64, y: f64| p::message(kind::INPUT, p::now(), false, &serde_json::to_vec(&serde_json::json!({"pointer": {"_0": action, "x": x / sw, "y": y / sh}})).unwrap());
+    let key_event = |down: bool| p::message(kind::INPUT, p::now(), false, &serde_json::to_vec(&serde_json::json!({"key": {"hidUsage": 0x1D, "down": down, "modifiers": 0}})).unwrap());
+    let (tx, ty) = (n("textX"), n("textY"));
+    for m in [pointer("leftDown", tx, ty), pointer("leftUp", tx, ty), key_event(true)] {
+        s.write_all(&m).await.unwrap();
+        s.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    gather(&mut s, 1.5, &mut seen).await;
+    s.write_all(&key_event(false)).await.unwrap();
+    s.flush().await.unwrap();
+    gather(&mut s, 0.3, &mut seen).await;
+    let events = std::fs::read_to_string(dir.join("events.txt")).unwrap_or_default();
+    let count = |ev: &str| ev.trim_start_matches('\u{feff}').lines().filter(|l| l.starts_with("text ")).count();
+    let held = count(&events);
+    println!("the held key typed {held} letters");
+    assert!(held >= 4, "a key held 1.5 s repeats: {held}");
+    gather(&mut s, 0.7, &mut seen).await;
+    assert_eq!(count(&std::fs::read_to_string(dir.join("events.txt")).unwrap()), held, "it stopped at its up");
+
+    // The PC's own pointer, moved by something other than this device.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    seen.remove(&kind::MAC_POINTER);
+    powershell("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(300,200)");
+    gather(&mut s, 0.8, &mut seen).await;
+    let at: serde_json::Value = serde_json::from_slice(seen.get(&kind::MAC_POINTER).expect("kind 26").last().unwrap()).unwrap();
+    println!("pointer report: {at}");
+    assert!(at["inside"] == true && (at["x"].as_f64().unwrap() - 300.0 / sw).abs() < 0.01, "{at}");
+
+    // Picking the window: the list says so to everyone, and it's in front.
+    let pick = serde_json::to_vec(&serde_json::json!({"window": {"_0": id}})).unwrap();
+    s.write_all(&p::message(kind::SELECT_SOURCE, p::now(), false, &pick)).await.unwrap();
+    s.flush().await.unwrap();
+    seen.remove(&kind::WINDOW_LIST);
+    gather(&mut s, 0.8, &mut seen).await;
+    let list: serde_json::Value = serde_json::from_slice(seen[&kind::WINDOW_LIST].last().unwrap()).unwrap();
+    assert_eq!(list["active"]["window"]["_0"].as_u64(), Some(id as u64), "{}", list["active"]);
+
+    // Window commands, as the bar's long-press menu sends them.
+    for action in ["fullScreen", "minimize", "close"] {
+        let c = serde_json::to_vec(&serde_json::json!({"id": id, "action": action})).unwrap();
+        s.write_all(&p::message(kind::WINDOW_COMMAND, p::now(), false, &c)).await.unwrap();
+        s.flush().await.unwrap();
+        gather(&mut s, 0.8, &mut seen).await;
+    }
+    let events = std::fs::read_to_string(dir.join("events.txt")).unwrap_or_default();
+    println!("window saw: {:?}", events.lines().filter(|l| !l.starts_with("text ")).collect::<Vec<_>>());
+    assert!(events.contains("state Maximized"), "full screen");
+    assert!(events.contains("state Minimized"), "minimize");
+    assert!(events.contains("closed"), "close");
+    // It closed: the next list drops it and the stream goes back to the Desktop.
+    seen.remove(&kind::WINDOW_LIST);
+    gather(&mut s, 2.5, &mut seen).await;
+    let list: serde_json::Value = serde_json::from_slice(seen.get(&kind::WINDOW_LIST).expect("a new list").last().unwrap()).unwrap();
+    assert!(list["active"].get("desktop").is_some(), "back to the Desktop: {}", list["active"]);
+    let _ = window.kill();
+}

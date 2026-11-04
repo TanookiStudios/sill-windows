@@ -5,6 +5,7 @@
 //! which `swift run SillConformance check tests/fixtures/rust` decodes with Sill's own decoders.
 
 use serde_json::Value;
+use sill_windows::cursor;
 use sill_windows::identity::{self_signed_certificate, certificate_fingerprint};
 use sill_windows::pairing::*;
 use sill_windows::protocol::{self as p, kind, Header, InputEvent, PointerAction, ScrollPhase};
@@ -69,6 +70,19 @@ fn window_list() -> p::WindowList {
     }
 }
 
+fn full_list() -> p::WindowList {
+    p::WindowList {
+        windows: vec![p::WindowInfo { id: 77, title: "Doc".into(), app_name: "Word".into(), bundle_id: "C:\\w.exe".into(), width: 800, height: 600 }],
+        active: p::StreamSource::Window { id: 77 },
+        gestures: Some(1), clipboard: Some(1), key_repeat: Some(1),
+        ..window_list()
+    }
+}
+
+fn apps() -> Vec<p::AppInfo> {
+    vec![p::AppInfo { name: "Calc".into(), bundle_id: "C:\\c.lnk".into() }]
+}
+
 fn settings() -> p::HostSettingsState {
     p::HostSettingsState {
         settings: p::StreamSettings { max_fps: 60, bitrate: 15_000_000, capture_scale: 1.0, prioritize_speed: true, virtual_display: false },
@@ -106,6 +120,14 @@ fn host_messages_match_swift() {
     let (ph, pp) = { let m = swift("ping.bin"); let (h, p) = split(&m); (h, p.to_vec()) };
     assert_eq!(p::message(kind::PONG, ph.timestamp, false, &pp), swift("pong.bin"), "pong");
     assert_json_message("windowlist.bin", &json(kind::WINDOW_LIST, &window_list()));
+    assert_json_message("windowlist_full.bin", &json(kind::WINDOW_LIST, &full_list()));
+    assert_eq!(p::message(kind::THUMBNAIL, TS, false, &p::encode_thumbnail(77, &[0xFF, 0xD8, 1])), swift("thumbnail.bin"), "thumbnail");
+    assert_eq!(p::message(kind::APP_ICON, TS, false, &p::encode_icon("C:\\w.exe", &[0x89, 0x50, 1])), swift("icon.bin"), "icon");
+    assert_json_message("applist.bin", &json(kind::APP_LIST, &apps()));
+    assert_eq!(p::message(kind::CURSOR_SHAPE, TS, false, &cursor::blob(1.5, 2.0, 32.0, 32.0, &[0x89, 0x50, 1])), swift("cursor.bin"), "cursor shape");
+    assert_json_message("pointer.bin", &json(kind::MAC_POINTER, &p::MacPointer { x: Some(0.25), y: Some(0.5), inside: true, seen: 12 }));
+    assert_json_message("pointer_off.bin", &json(kind::MAC_POINTER, &p::MacPointer { x: None, y: None, inside: false, seen: 12 }));
+    assert_json_message("clipboard_out.bin", &json(kind::CLIPBOARD, &p::Clipboard { text: Some("Hé".into()), stop: None }));
     assert_json_message("hostsettings.bin", &json(kind::HOST_SETTINGS, &settings()));
     assert_json_message("pairresult_ok.bin", &json(kind::PAIR_RESULT, &ok_result(&v)));
     assert_json_message("pairresult_shown.bin", &json(kind::PAIR_RESULT, &p::PairResult::refused("shown")));
@@ -139,6 +161,17 @@ fn device_messages_decode() {
     for (name, want) in cases {
         assert_eq!(decode::<InputEvent>(name, kind::INPUT), want, "{name}");
     }
+    assert_eq!(decode::<p::TrackpadGesture>("gesture.bin", kind::GESTURE).gesture, "swipeUp");
+    use sill_windows::clipboard::{from_device, Ask};
+    assert_eq!(from_device(split(&swift("clipboard_sub.bin")).1), Ask::Subscribe);
+    assert_eq!(from_device(split(&swift("clipboard_text.bin")).1), Ask::Set("Hé".into()));
+    assert_eq!(from_device(split(&swift("clipboard_stop.bin")).1), Ask::Stop);
+    assert_eq!(decode::<p::LaunchApp>("launch_app.bin", kind::LAUNCH_APP).bundle_id, "C:\\apps\\calc.lnk");
+    let c: p::WindowCommand = decode("window_command.bin", kind::WINDOW_COMMAND);
+    assert_eq!((c.id, c.action.as_str()), (77, "fullScreen"));
+    let v: p::Viewport = decode("viewport_scaled.bin", kind::VIEWPORT);
+    assert_eq!((v.width, v.height, v.scale), (1180.0, 820.0, Some(1.25)));
+    assert_eq!(decode::<p::Viewport>("viewport.bin", kind::VIEWPORT).scale, None);
     let hello: p::Hello = decode("hello.bin", kind::HELLO);
     assert_eq!((hello.app_version.as_deref(), hello.device.as_deref()), (Some("1.0"), Some("iPad (iPad14,1)")));
     assert_eq!(decode::<p::StreamSource>("select_desktop.bin", kind::SELECT_SOURCE), p::StreamSource::Desktop {});
@@ -202,6 +235,27 @@ fn write_rust_fixtures() {
     w("pairresult_shown.bin", json(kind::PAIR_RESULT, &p::PairResult::refused("shown")));
     w("pairresult_code.bin", json(kind::PAIR_RESULT, &p::PairResult { tries_left: Some(3), ..p::PairResult::refused("code") }));
     w("pairresult_ok.bin", json(kind::PAIR_RESULT, &ok_result(&v)));
+    w("windowlist_full.bin", json(kind::WINDOW_LIST, &full_list()));
+    w("thumbnail.bin", p::message(kind::THUMBNAIL, TS, false, &p::encode_thumbnail(77, &[0xFF, 0xD8, 1])));
+    w("icon.bin", p::message(kind::APP_ICON, TS, false, &p::encode_icon("C:\\w.exe", &[0x89, 0x50, 1])));
+    w("applist.bin", json(kind::APP_LIST, &apps()));
+    w("cursor.bin", p::message(kind::CURSOR_SHAPE, TS, false, &cursor::blob(1.5, 2.0, 32.0, 32.0, &[0x89, 0x50, 1])));
+    w("pointer.bin", json(kind::MAC_POINTER, &p::MacPointer { x: Some(0.25), y: Some(0.5), inside: true, seen: 12 }));
+    w("pointer_off.bin", json(kind::MAC_POINTER, &p::MacPointer { x: None, y: None, inside: false, seen: 12 }));
+    w("clipboard_out.bin", json(kind::CLIPBOARD, &p::Clipboard { text: Some("Hé".into()), stop: None }));
+    // Signed as the host signs it, through the real identity code.
+    let home = std::env::temp_dir().join(format!("sill-conformance-{}", std::process::id()));
+    std::env::set_var("SILL_HOME", &home);
+    let id = sill_windows::identity::Identity::load_or_create().unwrap();
+    let info = p::MacInfo {
+        v: 1, mac_id: mac_id(&id.fingerprint), name: "Test PC".into(), issued_at: 1234.5, remote_access: true, remote_port: 7455, internet: false,
+        addresses: vec![p::MacAddress { host: "100.101.102.103".into(), kind: "vpn".into(), via: "Tailscale".into() }],
+    };
+    let bytes = serde_json::to_vec(&info).unwrap();
+    use base64::Engine;
+    let b = base64::engine::general_purpose::STANDARD;
+    w("macinfo.bin", json(kind::MAC_INFO, &p::SignedMacInfo { info: b.encode(&bytes), key: b.encode(&id.point), sig: b.encode(id.sign(&bytes).unwrap()) }));
+    let _ = std::fs::remove_dir_all(&home);
     let rng = ring::rand::SystemRandom::new();
     let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(&ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
     let pair = ring::signature::EcdsaKeyPair::from_pkcs8(&ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng).unwrap();

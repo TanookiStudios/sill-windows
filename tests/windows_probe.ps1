@@ -16,6 +16,8 @@ $t.Add_TextChanged({ & $note ("text " + [Convert]::ToBase64String([Text.Encoding
 $p.Add_MouseDown({ param($s, $e) & $note ("down " + $e.Button + " " + $e.X + " " + $e.Y) })
 $p.Add_MouseEnter({ $p.Focus() | Out-Null })
 $p.Add_MouseWheel({ param($s, $e) & $note ("wheel " + $e.Delta) })
+$f.Add_Resize({ & $note ("state " + $f.WindowState) })
+$f.Add_FormClosed({ & $note "closed" })
 $f.Add_Shown({
   $f.Activate()
   $tb = $t.RectangleToScreen($t.ClientRectangle); $pb = $p.RectangleToScreen($p.ClientRectangle)

@@ -31,7 +31,7 @@ jobs:
         env:
           SILL_E2E_INPUT: "1"
           SILL_E2E_NO_VIDEO: "1"
-        run: cargo test --release --test end_to_end input_lands_on_windows -- --nocapture
+        run: cargo test --release --test end_to_end on_windows -- --nocapture --test-threads=1
       - name: Picture check (shows how far a machine with no GPU gets)
         continue-on-error: true
         env:

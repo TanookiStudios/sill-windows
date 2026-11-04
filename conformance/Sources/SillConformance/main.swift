@@ -7,6 +7,7 @@
 //                               a real device-side run over Network.framework (the iPad's TLS stack):
 //                               ask, pair with the code in CODEFILE, then a pinned sill/1 session
 import Foundation
+import CoreGraphics
 import CryptoKit
 import Network
 import Security
@@ -99,6 +100,25 @@ func dump(_ dir: URL) throws {
     try write("pair_qr.bin", message(.pairRequest, Wire.encode(PairRequest(method: PairRequest.qr, proof: Base64URL.encode(proofD),
                                                                           name: "iPad", model: "iPad14,1"))))
 
+    try write("gesture.bin", message(.gesture, Wire.encode(TrackpadGesture(gesture: TrackpadGesture.swipeUp, fingers: 3))))
+    try write("clipboard_sub.bin", message(.clipboard, Wire.encode(Clipboard())))
+    try write("clipboard_text.bin", message(.clipboard, Wire.encode(Clipboard(text: "Hé"))))
+    try write("clipboard_stop.bin", message(.clipboard, Wire.encode(Clipboard(stop: true))))
+    try write("launch_app.bin", message(.launchApp, Wire.encode(LaunchApp(bundleID: "C:\\apps\\calc.lnk"))))
+    try write("window_command.bin", message(.windowCommand, Wire.encode(WindowCommand(id: 77, action: .fullScreen))))
+    try write("viewport_scaled.bin", message(.viewport, Wire.encode(Viewport(width: 1180, height: 820, scale: 1.25))))
+    var full = WindowList(macName: "Test PC", windows: [WindowInfo(id: 77, title: "Doc", appName: "Word", bundleID: "C:\\w.exe", width: 800, height: 600)],
+                          active: .window(77), launchID: "L1", hostVersion: "0.1.0", protocol: 1, gestures: 1, clipboard: 1)
+    full.keyRepeat = 1
+    try write("windowlist_full.bin", message(.windowList, Wire.encode(full)))
+    try write("thumbnail.bin", message(.thumbnail, ImageBlob.encodeThumbnail(windowID: 77, jpeg: Data([0xFF, 0xD8, 1]))))
+    try write("icon.bin", message(.appIcon, ImageBlob.encodeIcon(bundleID: "C:\\w.exe", png: Data([0x89, 0x50, 1]))))
+    try write("applist.bin", message(.appList, Wire.encode([AppInfo(name: "Calc", bundleID: "C:\\c.lnk")])))
+    try write("cursor.bin", message(.cursorShape, CursorShapeBlob.encode(hotspot: CGPoint(x: 1.5, y: 2), size: CGSize(width: 32, height: 32), png: Data([0x89, 0x50, 1]))))
+    try write("pointer.bin", message(.macPointer, Wire.encode(MacPointer(x: 0.25, y: 0.5, inside: true, seen: 12))))
+    try write("pointer_off.bin", message(.macPointer, Wire.encode(MacPointer(inside: false, seen: 12))))
+    try write("clipboard_out.bin", message(.clipboard, Wire.encode(Clipboard(text: "Hé"))))
+
     // Crypto and text vectors.
     let code = code11.map(String.init).joined() + String(PairingCode.checkDigit(code11))
     let codeKey = PairingProof.codeKey(code: code, macFingerprint: fpMac)!
@@ -161,6 +181,43 @@ func check(_ dir: URL) throws {
     if let (h, p) = load("pairresult_code.bin") {
         let r = Wire.decode(PairResult.self, from: p)
         expect(h.kind == .pairResult && r?.reason == PairResult.code && r?.triesLeft == 3, "pairresult_code.bin")
+    }
+    if let (h, p) = load("windowlist_full.bin") {
+        let l = Wire.decode(WindowList.self, from: p)
+        expect(h.kind == .windowList && l?.active == .window(77) && l?.windows.first?.bundleID == "C:\\w.exe" && l?.gestures == 1 && l?.clipboard == 1 && l?.keyRepeat == 1,
+               "windowlist_full.bin: a window, active, with gestures, clipboard and key repeat")
+    }
+    if let (h, p) = load("thumbnail.bin") {
+        let t = ImageBlob.decodeThumbnail(p)
+        expect(h.kind == .thumbnail && t?.windowID == 77 && t?.jpeg == Data([0xFF, 0xD8, 1]), "thumbnail.bin")
+    }
+    if let (h, p) = load("icon.bin") {
+        let i = ImageBlob.decodeIcon(p)
+        expect(h.kind == .appIcon && i?.bundleID == "C:\\w.exe", "icon.bin")
+    }
+    if let (h, p) = load("applist.bin") {
+        expect(h.kind == .appList && Wire.decode([AppInfo].self, from: p)?.first?.bundleID == "C:\\c.lnk", "applist.bin")
+    }
+    if let (h, p) = load("cursor.bin") {
+        let c = CursorShapeBlob.decode(p)
+        expect(h.kind == .cursorShape && c?.hotspot.x == 1.5 && c?.hotspot.y == 2 && c?.size.width == 32 && c?.size.height == 32, "cursor.bin")
+    }
+    if let (h, p) = load("pointer.bin") {
+        let m = Wire.decode(MacPointer.self, from: p)
+        expect(h.kind == .macPointer && m?.position?.x == 0.25 && m?.seen == 12, "pointer.bin")
+    }
+    if let (_, p) = load("pointer_off.bin") {
+        let m = Wire.decode(MacPointer.self, from: p)
+        expect(m?.inside == false && m?.position == nil && m?.seen == 12, "pointer_off.bin")
+    }
+    if let (h, p) = load("clipboard_out.bin") {
+        expect(h.kind == .clipboard && Wire.decode(Clipboard.self, from: p)?.text == "Hé", "clipboard_out.bin")
+    }
+    if let (h, p) = load("macinfo.bin") {
+        let s = Wire.decode(SignedMacInfo.self, from: p)
+        let v = s?.verified()
+        expect(h.kind == .macInfo && v != nil && v?.info.remotePort == 7455 && v?.info.addresses.first?.kind == "vpn",
+               "macinfo.bin: the signature, Mac ID and fields verify with SignedMacInfo.verified()")
     }
     // The Rust host's ok, its proof, its link, its tag and its certificate, checked by Sill's own code.
     guard let vdata = try? Data(contentsOf: dir.appendingPathComponent("vectors.json")),
