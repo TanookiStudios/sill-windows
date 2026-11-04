@@ -85,11 +85,11 @@ fn apps() -> Vec<p::AppInfo> {
 
 fn settings() -> p::HostSettingsState {
     p::HostSettingsState {
-        settings: p::StreamSettings { max_fps: 60, bitrate: 15_000_000, capture_scale: 1.0, prioritize_speed: true, virtual_display: false },
+        settings: p::StreamSettings { max_fps: 60, bitrate: 15_000_000, capture_scale: 1.0, prioritize_speed: true, virtual_display: false, send_audio: None },
         persistent: false, virtual_display_available: false, virtual_display_note: Some("Not on Windows.".into()),
         software_encoder: false,
         stream: Some(p::RunningStream { width: 1920, height: 1080, fps: 60, mbps: 15, on_virtual_display: false }),
-        answering: Some(3), session_paired: Some(true),
+        answering: Some(3), audio_note: None, session_paired: Some(true),
     }
 }
 
@@ -242,6 +242,11 @@ fn write_rust_fixtures() {
     w("cursor.bin", p::message(kind::CURSOR_SHAPE, TS, false, &cursor::blob(1.5, 2.0, 32.0, 32.0, &[0x89, 0x50, 1])));
     w("pointer.bin", json(kind::MAC_POINTER, &p::MacPointer { x: Some(0.25), y: Some(0.5), inside: true, seen: 12 }));
     w("pointer_off.bin", json(kind::MAC_POINTER, &p::MacPointer { x: None, y: None, inside: false, seen: 12 }));
+    let mut eld = sill_windows::audio::Eld::new().unwrap();
+    let pcm: Vec<i16> = (0..sill_windows::audio::FRAMES * 2).map(|i| ((i as f32 / 40.0).sin() * 8000.0) as i16).collect();
+    let packet = (0..4).filter_map(|_| eld.encode(&pcm)).last().unwrap();
+    w("audio_format.bin", sill_windows::audio::format_message(7, &eld.cookie, eld.priming));
+    w("audio_packet.bin", sill_windows::audio::packet_message(7, 9, true, &packet, TS));
     w("clipboard_out.bin", json(kind::CLIPBOARD, &p::Clipboard { text: Some("Hé".into()), stop: None }));
     // Signed as the host signs it, through the real identity code.
     let home = std::env::temp_dir().join(format!("sill-conformance-{}", std::process::id()));

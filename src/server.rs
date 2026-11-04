@@ -46,6 +46,10 @@ struct Client {
     /// How many input messages were read from it, and when it last moved the pointer.
     inputs: u64,
     moved_at: f64,
+    /// Its hello lists the codec this host makes.
+    audio: bool,
+    /// The sound epoch whose format it has.
+    audio_epoch: Option<u16>,
 }
 
 /// What a device may change, and only to Sill's own choices. Kept in `settings.json`.
@@ -55,11 +59,13 @@ pub struct Settings {
     pub bitrate: i64,
     /// 2: the screen's own detail (up to --max-size). 1: half that, for a slow link.
     pub capture_scale: f64,
+    #[serde(default)]
+    pub send_audio: bool,
 }
 
 impl Default for Settings {
     fn default() -> Settings {
-        Settings { max_fps: 60, bitrate: 15_000_000, capture_scale: 2.0 }
+        Settings { max_fps: 60, bitrate: 15_000_000, capture_scale: 2.0, send_audio: false }
     }
 }
 
@@ -72,7 +78,7 @@ impl Settings {
     pub fn load() -> Settings {
         let d = Settings::default();
         let Ok(s) = std::fs::read(Self::path()).map_err(|_| ()).and_then(|b| serde_json::from_slice::<Settings>(&b).map_err(|_| ())) else { return d };
-        d.with(Some(s.max_fps), Some(s.bitrate), Some(s.capture_scale))
+        d.with(Some(s.max_fps), Some(s.bitrate), Some(s.capture_scale), Some(s.send_audio))
     }
 
     pub fn save(&self) {
@@ -81,7 +87,7 @@ impl Settings {
     }
 
     /// `self` with what a device asked for, where it's one of Sill's choices (SettingsChoices).
-    pub fn with(mut self, max_fps: Option<i64>, bitrate: Option<i64>, capture_scale: Option<f64>) -> Settings {
+    pub fn with(mut self, max_fps: Option<i64>, bitrate: Option<i64>, capture_scale: Option<f64>, send_audio: Option<bool>) -> Settings {
         const BITRATES: [i64; 7] = [4_000_000, 8_000_000, 15_000_000, 25_000_000, 40_000_000, 80_000_000, 150_000_000];
         if let Some(v) = max_fps.filter(|v| [60, 120].contains(v)) {
             self.max_fps = v;
@@ -91,6 +97,9 @@ impl Settings {
         }
         if let Some(v) = capture_scale.filter(|v| *v == 1.0 || *v == 2.0) {
             self.capture_scale = v;
+        }
+        if let Some(v) = send_audio {
+            self.send_audio = v;
         }
         self
     }
@@ -126,6 +135,8 @@ pub struct Hub {
     /// The only paths a device may launch: the ones this PC listed.
     pub app_paths: Mutex<Vec<String>>,
     pub viewport: Mutex<Option<p::Viewport>>,
+    /// Why no sound comes although Send Audio is on.
+    pub audio_note: Mutex<Option<String>>,
     cursor: Mutex<Option<Arc<Vec<u8>>>>,
     last_pointer: Mutex<Option<Option<(f64, f64)>>>,
 }
@@ -207,7 +218,7 @@ impl Hub {
 
     fn register(&self, tx: mpsc::UnboundedSender<Out>, in_flight: Arc<AtomicUsize>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        self.clients.lock().unwrap().insert(id, Client { tx, in_flight, needs_keyframe: true, clipboard: false, inputs: 0, moved_at: 0.0 });
+        self.clients.lock().unwrap().insert(id, Client { tx, in_flight, needs_keyframe: true, clipboard: false, inputs: 0, moved_at: 0.0, audio: false, audio_epoch: None });
         self.request_keyframe();
         id
     }
@@ -219,6 +230,26 @@ impl Hub {
     fn send(&self, id: u64, data: Vec<u8>) {
         if let Some(c) = self.clients.lock().unwrap().get(&id) {
             let _ = c.tx.send(Out { data: Arc::new(data), frame: false });
+        }
+    }
+
+    /// Send Audio is on and a device plays this host's codec.
+    pub fn audio_wanted(&self) -> bool {
+        self.settings.lock().unwrap().send_audio && self.clients.lock().unwrap().values().any(|c| c.audio)
+    }
+
+    /// A sound packet to every device that plays it, each one's format first. Never counted as a
+    /// frame: sound doesn't make the picture drop.
+    pub fn send_audio(&self, format: &Arc<Vec<u8>>, epoch: u16, packet: Vec<u8>) {
+        let packet = Arc::new(packet);
+        for c in self.clients.lock().unwrap().values_mut() {
+            if c.audio {
+                if c.audio_epoch != Some(epoch) {
+                    c.audio_epoch = Some(epoch);
+                    let _ = c.tx.send(Out { data: format.clone(), frame: false });
+                }
+                let _ = c.tx.send(Out { data: packet.clone(), frame: false });
+            }
         }
     }
 
@@ -363,6 +394,7 @@ impl Host {
                 capture_scale: s.capture_scale,
                 prioritize_speed: true,
                 virtual_display: false,
+                send_audio: Some(s.send_audio),
             },
             persistent: true,
             virtual_display_available: false,
@@ -370,6 +402,7 @@ impl Host {
             software_encoder: false,
             stream: self.hub.stream.lock().unwrap().clone(),
             answering,
+            audio_note: self.hub.audio_note.lock().unwrap().clone(),
             session_paired: Some(true),
         }
     }
@@ -568,6 +601,11 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
             },
             kind::HELLO => {
                 if let Ok(hello) = serde_json::from_slice::<p::Hello>(&payload) {
+                    if hello.audio.as_ref().is_some_and(|a| a.iter().any(|c| c == "aac-eld")) {
+                        if let Some(c) = host.hub.clients.lock().unwrap().get_mut(&id) {
+                            c.audio = true;
+                        }
+                    }
                     crate::say!(
                         "{name} is {} with Sill {}.",
                         p::safe_label(hello.device.as_deref().unwrap_or("a device"), 64),
@@ -626,17 +664,23 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
                 let Ok(c) = serde_json::from_slice::<p::HostSettingsChange>(&payload) else { continue };
                 let changed = {
                     let mut s = host.hub.settings.lock().unwrap();
-                    let new = s.with(c.max_fps, c.bitrate, c.capture_scale);
+                    let new = s.with(c.max_fps, c.bitrate, c.capture_scale, c.send_audio);
                     let changed = new != *s;
+                    let picture = Settings { send_audio: s.send_audio, ..new } != *s;
                     *s = new;
-                    changed
+                    (changed, picture)
                 };
-                if changed {
+                if changed.0 {
                     host.hub.settings.lock().unwrap().save();
-                    host.hub.restart_picture.store(true, Ordering::SeqCst);
                     crate::say!("{name} changed the settings.");
                 }
+                if changed.1 {
+                    host.hub.restart_picture.store(true, Ordering::SeqCst);
+                }
                 host.hub.send(id, p::json_message(kind::HOST_SETTINGS, &host.settings_state(c.token)));
+                if changed.0 {
+                    host.hub.send_all(p::json_message(kind::HOST_SETTINGS, &host.settings_state(None)));
+                }
             }
             kind::GESTURE => {
                 if let Ok(g) = serde_json::from_slice::<p::TrackpadGesture>(&payload) {

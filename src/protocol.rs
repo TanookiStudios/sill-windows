@@ -39,6 +39,7 @@ pub mod kind {
     pub const MAC_POINTER: u8 = 26;
     pub const GESTURE: u8 = 28;
     pub const CLIPBOARD: u8 = 32;
+    pub const AUDIO: u8 = 43;
     pub const KEYFRAME_REQUEST: u8 = 44;
 }
 
@@ -164,6 +165,8 @@ pub struct StreamSettings {
     pub capture_scale: f64,
     pub prioritize_speed: bool,
     pub virtual_display: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_audio: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -189,6 +192,8 @@ pub struct HostSettingsState {
     pub stream: Option<RunningStream>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answering: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_paired: Option<bool>,
 }
@@ -278,6 +283,7 @@ pub enum InputEvent {
 pub struct Hello {
     pub app_version: Option<String>,
     pub device: Option<String>,
+    pub audio: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -306,6 +312,7 @@ pub struct HostSettingsChange {
     pub max_fps: Option<i64>,
     pub bitrate: Option<i64>,
     pub capture_scale: Option<f64>,
+    pub send_audio: Option<bool>,
 }
 
 /// An installed app, for the drawer's "All apps" (kind 5 is a list of these).

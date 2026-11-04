@@ -116,6 +116,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         check_picture(&checking);
     });
     sill_windows::clipboard::start(hub.clone());
+    sill_windows::audio::start(hub.clone());
     sill_windows::catalog::start_pointer(hub.clone(), pointer_rect);
     let window_up = pair_window::start(trust.count() == 0);
 

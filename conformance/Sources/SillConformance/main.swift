@@ -213,6 +213,17 @@ func check(_ dir: URL) throws {
     if let (h, p) = load("clipboard_out.bin") {
         expect(h.kind == .clipboard && Wire.decode(Clipboard.self, from: p)?.text == "Hé", "clipboard_out.bin")
     }
+    if let (h, p) = load("audio_format.bin") {
+        if case .format(let f)? = AudioMessage.parse(p) {
+            expect(h.kind == .audio && f.codec == AudioCodec.aacELD && f.sampleRate == 48000 && f.channels == 2 && f.framesPerPacket == 480 && f.epoch == 7 && f.cookie?.isEmpty == false,
+                   "audio_format.bin parses: AAC-ELD, \(f.primingFrames ?? -1) priming frames, cookie \(f.cookie.map(hex) ?? "none")")
+        } else { expect(false, "audio_format.bin parses") }
+    }
+    if let (h, p) = load("audio_packet.bin") {
+        if case .packets(let a)? = AudioMessage.parse(p) {
+            expect(h.kind == .audio && a.epoch == 7 && a.seq == 9 && a.segmentStart && a.packets.count == 1, "audio_packet.bin parses")
+        } else { expect(false, "audio_packet.bin parses") }
+    }
     if let (h, p) = load("macinfo.bin") {
         let s = Wire.decode(SignedMacInfo.self, from: p)
         let v = s?.verified()
