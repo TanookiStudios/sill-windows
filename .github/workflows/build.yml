@@ -70,6 +70,29 @@ jobs:
           Copy-Item target\release\SillHost.exe dist\
           Copy-Item README.md dist\README.txt
           Copy-Item LICENSE dist\LICENSE.txt
+          Copy-Item THIRD-PARTY-NOTICES.txt dist\THIRD-PARTY-NOTICES.txt
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y | Out-Null
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\sill.iss
+          Copy-Item installer\Output\SillSetup.exe dist\SillSetup.exe
+      - name: Try the installer, for real
+        shell: pwsh
+        run: |
+          Start-Process dist\SillSetup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          $exe = 'C:\Program Files\Sill for Windows\SillHost.exe'
+          if (-not (Test-Path $exe)) { throw 'SillHost.exe was not installed' }
+          & $exe --help | Select-Object -First 1
+          netsh advfirewall firewall show rule name="Sill for Windows" | Select-String 'Enabled|Direction|Action|Profiles|Program'
+          if ($LASTEXITCODE -ne 0) { throw 'no firewall rule' }
+          Start-Process 'C:\Program Files\Sill for Windows\unins000.exe' -ArgumentList '/VERYSILENT' -Wait
+          Start-Sleep 3
+          if (Test-Path $exe) { throw 'uninstall left the program behind' }
+          netsh advfirewall firewall show rule name="Sill for Windows" | Out-Null
+          if ($LASTEXITCODE -eq 0) { throw 'uninstall left the firewall rule behind' }
+          $global:LASTEXITCODE = 0
+          'Installed and uninstalled cleanly.'
       - uses: actions/upload-artifact@v4
         with:
           name: SillHost-windows

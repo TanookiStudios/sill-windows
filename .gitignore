@@ -3,3 +3,5 @@
 /conformance/Package.resolved
 /tests/fixtures/rust
 .DS_Store
+/installer/Output
+/dist
