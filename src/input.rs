@@ -137,11 +137,11 @@ impl Keys {
             return vec![(vk, ext, down)];
         }
         // ⌘Space alone: the Windows key, which opens Start and its search (Spotlight's place).
-        if usage == 0x2C && flags & (COMMAND | CONTROL | OPTION | SHIFT) == COMMAND {
+        if opens_start(usage, flags) {
             if !down {
                 return vec![];
             }
-            let mut s: Vec<Stroke> = self.held.iter().rev().map(|&h| (h, false, false)).collect();
+            let mut s: Vec<Stroke> = self.held.iter().rev().map(|&h| (h, extended_modifier(h), false)).collect();
             self.held.clear();
             s.extend([(VK_LWIN, true, true), (VK_LWIN, true, false)]);
             return s;
@@ -172,9 +172,23 @@ impl Keys {
             }
             s.extend(extra.into_iter().map(|m| (m, false, false)));
         }
-        s.extend(self.held.drain(..).map(|h| (h, false, false)));
+        s.extend(self.held.drain(..).map(|h| (h, extended_modifier(h), false)));
         s
     }
+}
+
+fn opens_start(usage: u16, flags: u64) -> bool {
+    usage == 0x2C && flags & (COMMAND | CONTROL | OPTION | SHIFT) == COMMAND
+}
+
+/// Right Ctrl and right Alt are extended keys: letting one go has to say so too.
+fn extended_modifier(vk: u16) -> bool {
+    vk == 0xA3 || vk == 0xA5
+}
+
+/// Whether a held key repeats: not Caps Lock, Num Lock, the volume keys, or ⌘Space.
+fn repeats(usage: u16, flags: u64) -> bool {
+    !is_modifier_usage(usage) && !matches!(usage, 0x39 | 0x53 | 0x7F..=0x81) && !opens_start(usage, flags)
 }
 
 /// Scroll fractions as wheel units, keeping the remainder so slow drags still scroll.
@@ -211,9 +225,28 @@ pub enum Action {
 pub struct Translator {
     pub keys: Keys,
     wheel: Wheel,
+    /// Mouse buttons a device holds down: (left, right).
+    buttons: (bool, bool),
 }
 
 impl Translator {
+    /// Everything this device still holds, let go: when it leaves, a dropped Wi-Fi mid-drag mustn't
+    /// leave a button or a modifier held on the PC.
+    pub fn release(&mut self) -> Vec<Action> {
+        let mut a = Vec::new();
+        if std::mem::take(&mut self.buttons.0) {
+            a.push(Action::Button { right: false, down: false });
+        }
+        if std::mem::take(&mut self.buttons.1) {
+            a.push(Action::Button { right: true, down: false });
+        }
+        let keys = self.keys.release_all();
+        if !keys.is_empty() {
+            a.push(Action::Keys(keys));
+        }
+        a
+    }
+
     pub fn translate(&mut self, event: &InputEvent, rect: Rect) -> Vec<Action> {
         let point = |x: f64, y: f64| {
             let px = rect.left + (x.clamp(0.0, 1.0) * (rect.width - 1).max(0) as f64).round() as i32;
@@ -223,12 +256,16 @@ impl Translator {
         match event {
             InputEvent::Pointer { action, x, y } => {
                 let mut a = vec![point(*x, *y)];
-                match action {
-                    PointerAction::Move => {}
-                    PointerAction::LeftDown => a.push(Action::Button { right: false, down: true }),
-                    PointerAction::LeftUp => a.push(Action::Button { right: false, down: false }),
-                    PointerAction::RightDown => a.push(Action::Button { right: true, down: true }),
-                    PointerAction::RightUp => a.push(Action::Button { right: true, down: false }),
+                let press = match action {
+                    PointerAction::Move => None,
+                    PointerAction::LeftDown => Some((false, true)),
+                    PointerAction::LeftUp => Some((false, false)),
+                    PointerAction::RightDown => Some((true, true)),
+                    PointerAction::RightUp => Some((true, false)),
+                };
+                if let Some((right, down)) = press {
+                    if right { self.buttons.1 = down } else { self.buttons.0 = down }
+                    a.push(Action::Button { right, down });
                 }
                 a
             }
@@ -311,6 +348,8 @@ pub struct Repeat {
     interval: f64,
     held: Option<(u16, bool, f64)>,
     heard: f64,
+    /// The device holding the key: only its silence stops it.
+    owner: u64,
 }
 
 /// How long a device may go unheard before its held key stops (it pings four times a second).
@@ -318,10 +357,11 @@ const SILENCE: f64 = 0.5;
 
 impl Repeat {
     pub fn new(delay: f64, interval: f64) -> Repeat {
-        Repeat { delay, interval, held: None, heard: 0.0 }
+        Repeat { delay, interval, held: None, heard: 0.0, owner: 0 }
     }
 
-    pub fn press(&mut self, stroke: Stroke, now: f64) {
+    pub fn press(&mut self, stroke: Stroke, owner: u64, now: f64) {
+        self.owner = owner;
         self.heard = now;
         self.held = Some((stroke.0, stroke.1, now + self.delay));
     }
@@ -330,8 +370,14 @@ impl Repeat {
         self.held = None;
     }
 
-    pub fn heard(&mut self, now: f64) {
-        self.heard = now;
+    pub fn heard(&mut self, device: u64, now: f64) {
+        if device == self.owner {
+            self.heard = now;
+        }
+    }
+
+    pub fn owner(&self) -> u64 {
+        self.owner
     }
 
     /// When `tick` next has something to do.
@@ -356,12 +402,14 @@ impl Repeat {
 
 /// What the input thread takes.
 pub enum Command {
-    Event(InputEvent),
+    Event(u64, InputEvent),
     Gesture(String),
     /// A device was heard from: its held key may go on repeating.
-    Heard,
+    Heard(u64),
     /// A device left: nothing it held stays held.
-    Left,
+    Left(u64),
+    /// The program is quitting: nothing anyone holds stays held.
+    Quit,
 }
 
 /// Windows' own keyboard settings: (delay, interval) in seconds.
@@ -388,7 +436,8 @@ pub fn start(rect: std::sync::Arc<std::sync::Mutex<Rect>>) -> std::sync::mpsc::S
     std::thread::Builder::new()
         .name("input".into())
         .spawn(move || {
-            let mut t = Translator::default();
+            // Each device's own keys and buttons, so one leaving lets go of only what it held.
+            let mut devices: std::collections::HashMap<u64, Translator> = Default::default();
             let (delay, interval) = keyboard_timing();
             let mut repeat = Repeat::new(delay, interval);
             let clock = Instant::now();
@@ -396,25 +445,40 @@ pub fn start(rect: std::sync::Arc<std::sync::Mutex<Rect>>) -> std::sync::mpsc::S
             loop {
                 let wait = repeat.due().map(|d| (d - now()).max(0.0)).unwrap_or(3600.0);
                 match rx.recv_timeout(Duration::from_secs_f64(wait)) {
-                    Ok(Command::Event(e)) => {
+                    Ok(Command::Event(device, e)) => {
                         match &e {
-                            InputEvent::Key { hid_usage, down, .. } if !is_modifier_usage(*hid_usage) => match (*down, virtual_key(*hid_usage)) {
-                                (true, Some((vk, ext))) => repeat.press((vk, ext, true), now()),
+                            InputEvent::Key { hid_usage, down, .. } if is_modifier_usage(*hid_usage) => {
+                                let _ = (hid_usage, down);
+                            }
+                            InputEvent::Key { hid_usage, down, modifiers } => match (*down && repeats(*hid_usage, *modifiers), virtual_key(*hid_usage)) {
+                                (true, Some((vk, ext))) => repeat.press((vk, ext, true), device, now()),
                                 _ => repeat.stop(),
                             },
                             InputEvent::Text { .. } => repeat.stop(),
                             _ => {}
                         }
                         let r = *rect.lock().unwrap();
-                        for a in t.translate(&e, r) {
+                        for a in devices.entry(device).or_default().translate(&e, r) {
                             post(a);
                         }
                     }
-                    Ok(Command::Gesture(name)) => post(Action::Keys(gesture_strokes(&name))),
-                    Ok(Command::Heard) => repeat.heard(now()),
-                    Ok(Command::Left) => {
+                    Ok(Command::Gesture(name)) => {
                         repeat.stop();
-                        post(Action::Keys(t.keys.release_all()));
+                        post(Action::Keys(gesture_strokes(&name)));
+                    }
+                    Ok(Command::Heard(device)) => repeat.heard(device, now()),
+                    Ok(Command::Left(device)) => {
+                        if repeat.owner() == device {
+                            repeat.stop();
+                        }
+                        if let Some(mut t) = devices.remove(&device) {
+                            t.release().into_iter().for_each(post);
+                        }
+                    }
+                    Ok(Command::Quit) => {
+                        repeat.stop();
+                        devices.values_mut().flat_map(|t| t.release()).for_each(post);
+                        devices.clear();
                     }
                     Err(RecvTimeoutError::Timeout) => {
                         if let Some(s) = repeat.tick(now()) {
@@ -424,7 +488,6 @@ pub fn start(rect: std::sync::Arc<std::sync::Mutex<Rect>>) -> std::sync::mpsc::S
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
             }
-            post(Action::Keys(t.keys.release_all()));
         })
         .expect("input thread");
     tx
@@ -548,17 +611,40 @@ mod tests {
     #[test]
     fn held_key_repeats_while_heard() {
         let mut r = Repeat::new(0.5, 0.1);
-        r.press((0x41, false, true), 0.0);
+        r.press((0x41, false, true), 1, 0.0);
         assert_eq!(r.tick(0.4), None, "not before the delay");
-        r.heard(0.45);
+        r.heard(2, 0.45);
+        r.heard(1, 0.45);
         assert_eq!(r.tick(0.5), Some((0x41, false, true)));
         assert_eq!(r.due(), Some(0.6));
         assert_eq!(r.tick(0.55), None);
         assert_eq!(r.tick(1.5), None, "its device went quiet: it stops");
         assert_eq!(r.due(), None);
-        r.press((0x41, false, true), 2.0);
+        r.press((0x41, false, true), 1, 2.0);
+        r.heard(2, 2.4);
+        assert_eq!(r.tick(2.6), None, "another device being heard doesn't keep it going");
+        r.press((0x41, false, true), 1, 2.0);
         r.stop();
         assert_eq!(r.tick(9.0), None, "the key's up ends it");
+    }
+
+    #[test]
+    fn nothing_stays_held() {
+        let mut t = Translator::default();
+        t.translate(&InputEvent::Pointer { action: PointerAction::LeftDown, x: 0.5, y: 0.5 }, R);
+        t.translate(&InputEvent::Key { hid_usage: 0xE7, down: true, modifiers: COMMAND }, R);
+        assert_eq!(t.release(), vec![Action::Button { right: false, down: false }, Action::Keys(vec![(0xA3, true, false)])]);
+        assert!(t.release().is_empty());
+    }
+
+    #[test]
+    fn what_repeats() {
+        assert!(repeats(0x04, 0));
+        assert!(!repeats(0xE0, 0), "a modifier");
+        assert!(!repeats(0x39, 0), "Caps Lock");
+        assert!(!repeats(0x80, 0), "volume");
+        assert!(!repeats(0x2C, COMMAND), "⌘Space opens Start once");
+        assert!(repeats(0x2C, 0));
     }
 
     #[test]

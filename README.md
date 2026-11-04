@@ -72,9 +72,10 @@ reach Windows, and a keyboard attached to the iPad works too. Holding a key down
 - **One window instead of the whole screen.** Open **Apps** on the iPad. Your open windows are
   there with little pictures, and tapping one brings it to the front and shows just that window.
   Windows shows it by showing that part of the screen, so if something else covers it on the PC, you
-  see what's covering it. **Desktop** goes back to the whole screen.
-- **Other apps.** **Apps** also lists what's in your Start menu. Tap one to open it. Store apps
-  aren't listed, but their windows are once they're open.
+  see what's covering it. If you minimize it, the picture waits until it's back. **Desktop** goes back to
+  the whole screen.
+- **Other apps.** **Apps** also lists what's in your Start menu. Tap one to open it, and its window
+  streams. Store apps aren't in that list, but their windows are once they're open.
 - **A second monitor.** Extra monitors appear in **Apps** as Display 2, Display 3 and so on.
 - **Copy and paste.** With **Share Clipboard** on in the iPad's Settings, text you copy on either
   one can be pasted on the other.
@@ -142,7 +143,8 @@ the PC quit.
 - The PC's menus on the iPad. Windows apps mostly don't have menus Sill could read.
 - Images on the clipboard: text only, as in Sill itself.
 - The Windows lock screen and administrator prompts: Windows keeps those from every screen-sharing
-  program, so the picture waits until they're gone. You can't unlock the PC from the iPad.
+  program, so the picture waits until they're gone. You can't unlock the PC from the iPad. While the
+  PC is locked, the iPad gets no windows, sound or clipboard, and can't open or close anything.
 - Pairing by USB cable, and reaching the PC over the open internet without a VPN.
 - A signed program, so Windows still shows its blue warning the first time.
 

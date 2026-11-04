@@ -154,6 +154,9 @@ pub struct WindowList {
     /// 1: this host repeats a held key, so a device sends a hardware keyboard's characters as keys.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key_repeat: Option<i64>,
+    /// This PC is locked: the list holds no windows and no `clipboard`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -343,6 +346,8 @@ pub struct Viewport {
     pub width: f64,
     pub height: f64,
     pub scale: Option<f64>,
+    /// The rate this device's panel wants (nil: 60).
+    pub fps: Option<i64>,
 }
 
 /// Kind 26: where the PC's pointer is while this device isn't moving it.

@@ -50,6 +50,8 @@ struct Client {
     audio: bool,
     /// The sound epoch whose format it has.
     audio_epoch: Option<u16>,
+    /// The rate its panel wants.
+    fps: i64,
 }
 
 /// What a device may change, and only to Sill's own choices. Kept in `settings.json`.
@@ -135,6 +137,11 @@ pub struct Hub {
     /// The only paths a device may launch: the ones this PC listed.
     pub app_paths: Mutex<Vec<String>>,
     pub viewport: Mutex<Option<p::Viewport>>,
+    /// This PC is locked: nothing of it goes to devices, and nothing they ask of it is done.
+    pub locked: AtomicBool,
+    /// An app a device opened: when, and the windows that were there then. Its first new window
+    /// streams, as a device expects.
+    pub launching: Mutex<Option<(f64, Vec<u32>)>>,
     /// Why no sound comes although Send Audio is on.
     pub audio_note: Mutex<Option<String>>,
     cursor: Mutex<Option<Arc<Vec<u8>>>>,
@@ -149,6 +156,19 @@ impl Hub {
     /// Whether the picture should run: a device is connected, or the startup check is on.
     pub fn wanted(&self) -> bool {
         self.checking.load(Ordering::SeqCst) || (self.client_count() > 0 && !matches!(*self.source.lock().unwrap(), p::StreamSource::None {}))
+    }
+
+    /// The stream's rate: the highest any device's panel wants, up to the setting.
+    pub fn stream_fps(&self) -> i64 {
+        let limit = self.settings.lock().unwrap().max_fps;
+        let wanted = self.clients.lock().unwrap().values().map(|c| c.fps).max().unwrap_or(60);
+        wanted.clamp(24, limit)
+    }
+
+    fn set_client_fps(&self, id: u64, fps: i64) {
+        if let Some(c) = self.clients.lock().unwrap().get_mut(&id) {
+            c.fps = fps;
+        }
     }
 
     /// Whether the source changed. The picture restarts on it; the first frame is a keyframe.
@@ -218,7 +238,7 @@ impl Hub {
 
     fn register(&self, tx: mpsc::UnboundedSender<Out>, in_flight: Arc<AtomicUsize>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        self.clients.lock().unwrap().insert(id, Client { tx, in_flight, needs_keyframe: true, clipboard: false, inputs: 0, moved_at: 0.0, audio: false, audio_epoch: None });
+        self.clients.lock().unwrap().insert(id, Client { tx, in_flight, needs_keyframe: true, clipboard: false, inputs: 0, moved_at: 0.0, audio: false, audio_epoch: None, fps: 60 });
         self.request_keyframe();
         id
     }
@@ -235,7 +255,7 @@ impl Hub {
 
     /// Send Audio is on and a device plays this host's codec.
     pub fn audio_wanted(&self) -> bool {
-        self.settings.lock().unwrap().send_audio && self.clients.lock().unwrap().values().any(|c| c.audio)
+        !self.locked.load(Ordering::SeqCst) && self.settings.lock().unwrap().send_audio && self.clients.lock().unwrap().values().any(|c| c.audio)
     }
 
     /// A sound packet to every device that plays it, each one's format first. Never counted as a
@@ -350,9 +370,10 @@ impl Host {
     }
 
     pub fn window_list(&self) -> Vec<u8> {
+        let locked = self.hub.locked.load(Ordering::SeqCst);
         p::json_message(kind::WINDOW_LIST, &p::WindowList {
             mac_name: self.name.clone(),
-            windows: self.hub.windows.lock().unwrap().clone(),
+            windows: if locked { vec![] } else { self.hub.windows.lock().unwrap().clone() },
             active: self.hub.source.lock().unwrap().clone(),
             launch_id: Some(self.launch_id.clone()),
             // Sill's test scripts refuse a host that names a version (a real host would act on their
@@ -360,8 +381,9 @@ impl Host {
             host_version: std::env::var_os("SILL_TEST_NO_VERSION").is_none().then(|| env!("CARGO_PKG_VERSION").into()),
             protocol: Some(1),
             gestures: Some(1),
-            clipboard: Some(1),
+            clipboard: (!locked).then_some(1),
             key_repeat: Some(1),
+            locked: locked.then_some(true),
         })
     }
 
@@ -564,8 +586,10 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
     for icon in host.hub.icons.lock().unwrap().iter() {
         let _ = tx.send(Out { data: icon.clone(), frame: false });
     }
-    for thumbnail in host.hub.thumbnails.lock().unwrap().values() {
-        let _ = tx.send(Out { data: thumbnail.clone(), frame: false });
+    if !host.hub.locked.load(Ordering::SeqCst) {
+        for thumbnail in host.hub.thumbnails.lock().unwrap().values() {
+            let _ = tx.send(Out { data: thumbnail.clone(), frame: false });
+        }
     }
     if let Some(apps) = host.hub.app_list.lock().unwrap().clone() {
         let _ = tx.send(Out { data: apps, frame: false });
@@ -589,13 +613,17 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
             Ok(Err(e)) => break e,
             Err(_) => break "silent for 15 s".to_string(),
         };
-        let _ = host.input.send(crate::input::Command::Heard);
+        let _ = host.input.send(crate::input::Command::Heard(id));
+        // While the PC is locked, a device changes nothing on it (input is Windows' to refuse).
+        if host.hub.locked.load(Ordering::SeqCst) && matches!(h.kind, kind::LAUNCH_APP | kind::WINDOW_COMMAND | kind::CLIPBOARD) {
+            continue;
+        }
         match h.kind {
             kind::PING => host.hub.send(id, p::message(kind::PONG, h.timestamp, false, &payload)),
             kind::INPUT => match serde_json::from_slice::<p::InputEvent>(&payload) {
                 Ok(e) => {
                     host.hub.note_input(id, matches!(e, p::InputEvent::Pointer { .. } | p::InputEvent::Scroll { .. }));
-                    let _ = host.input.send(crate::input::Command::Event(e));
+                    let _ = host.input.send(crate::input::Command::Event(id, e));
                 }
                 Err(_) => crate::warn!("{name}: an input message didn't decode: {}", String::from_utf8_lossy(&payload)),
             },
@@ -639,7 +667,12 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
                     crate::warn!("{name}'s panel size was refused.");
                     continue;
                 }
+                host.hub.set_client_fps(id, v.fps.unwrap_or(60));
                 *host.hub.viewport.lock().unwrap() = Some(v);
+                // A device whose panel wants another rate than the stream runs at.
+                if host.hub.stream.lock().unwrap().as_ref().is_some_and(|s| s.fps != host.hub.stream_fps()) {
+                    host.hub.restart_picture.store(true, Ordering::SeqCst);
+                }
                 let source = host.hub.source.lock().unwrap().clone();
                 if let p::StreamSource::Window { id } = source {
                     fit_to_viewport(&host, id);
@@ -654,8 +687,15 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
             kind::LAUNCH_APP => {
                 let Ok(a) = serde_json::from_slice::<p::LaunchApp>(&payload) else { continue };
                 // Only what this PC listed: a device's message never names a program to run.
-                if host.hub.app_paths.lock().unwrap().contains(&a.bundle_id) && !crate::catalog::platform::launch(&a.bundle_id) {
-                    crate::warn!("Windows couldn't open that app.");
+                if host.hub.app_paths.lock().unwrap().contains(&a.bundle_id) {
+                    let known = host.hub.windows.lock().unwrap().iter().map(|w| w.id).collect();
+                    *host.hub.launching.lock().unwrap() = Some((p::now(), known));
+                    // Opening can wait on a prompt; pings must go on being answered meanwhile.
+                    std::thread::spawn(move || {
+                        if !crate::catalog::platform::launch(&a.bundle_id) {
+                            crate::warn!("Windows couldn't open that app.");
+                        }
+                    });
                 }
             }
             kind::CHANGE_SETTINGS => {
@@ -725,7 +765,10 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
         }
     };
     host.hub.unregister(id);
-    let _ = host.input.send(crate::input::Command::Left);
+    let _ = host.input.send(crate::input::Command::Left(id));
+    if host.hub.stream.lock().unwrap().as_ref().is_some_and(|s| s.fps != host.hub.stream_fps()) {
+        host.hub.restart_picture.store(true, Ordering::SeqCst);
+    }
     writing.abort();
     crate::say!("{name} left ({reason}).");
     Ok(())
@@ -734,7 +777,7 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
 /// A device's text scale for a window: the window takes the panel's size at that scale.
 fn fit_to_viewport(host: &Host, id: u32) {
     let viewport = host.hub.viewport.lock().unwrap().clone();
-    if let Some(p::Viewport { width, height, scale: Some(s) }) = viewport {
+    if let Some(p::Viewport { width, height, scale: Some(s), .. }) = viewport {
         crate::catalog::platform::fit(id, width / s, height / s);
     }
 }

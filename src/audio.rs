@@ -143,6 +143,10 @@ pub fn start(hub: Arc<Hub>) {
             loop {
                 std::thread::sleep(Duration::from_millis(200));
                 if !hub.audio_wanted() {
+                    // Off: no note about sound that nobody asked for.
+                    if hub.audio_note.lock().unwrap().take().is_some() {
+                        hub.stream_changed.store(true, Ordering::SeqCst);
+                    }
                     continue;
                 }
                 epoch = epoch.wrapping_add(1);
@@ -165,7 +169,15 @@ fn run(hub: &Hub, epoch: u16) -> Result<(), String> {
     let (mut pending, mut seq, mut segment_start) = (Vec::<f32>::new(), 0u32, true);
     let mut last_data = Instant::now();
     crate::say!("Sending sound to devices.");
+    let mut looked = Instant::now();
     while hub.audio_wanted() {
+        // Someone picked another output in Windows: follow it.
+        if looked.elapsed() > Duration::from_secs(3) {
+            looked = Instant::now();
+            if capture.output_changed() {
+                return Ok(());
+            }
+        }
         let chunk = capture.read()?;
         if chunk.is_empty() {
             if last_data.elapsed() > GAP && !segment_start {
@@ -201,6 +213,8 @@ mod platform {
     pub struct Capture {
         client: IAudioClient,
         capture: IAudioCaptureClient,
+        devices: IMMDeviceEnumerator,
+        output: String,
         channels: usize,
         bits: u16,
         rate: f64,
@@ -218,6 +232,7 @@ mod platform {
                 let e = |what: &'static str| move |err: windows::core::Error| format!("{what}: {err}");
                 let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(e("the sound system didn't answer"))?;
                 let device = devices.GetDefaultAudioEndpoint(eRender, eConsole).map_err(e("this PC has no sound output"))?;
+                let output = output_id(&device);
                 let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(e("the sound output wouldn't open"))?;
                 let format = client.GetMixFormat().map_err(e("the sound format is unknown"))?;
                 let (channels, rate, bits) = ((*format).nChannels as usize, (*format).nSamplesPerSec as f64, (*format).wBitsPerSample);
@@ -226,8 +241,12 @@ mod platform {
                 started.map_err(e("sound capture wouldn't start"))?;
                 let capture: IAudioCaptureClient = client.GetService().map_err(e("sound capture wouldn't start"))?;
                 client.Start().map_err(e("sound capture wouldn't start"))?;
-                Ok(Capture { client, capture, channels, bits, rate, phase: 0.0, last: [0.0; 2] })
+                Ok(Capture { client, capture, devices, output, channels, bits, rate, phase: 0.0, last: [0.0; 2] })
             }
+        }
+
+        pub fn output_changed(&self) -> bool {
+            unsafe { self.devices.GetDefaultAudioEndpoint(eRender, eConsole).map(|d| output_id(&d) != self.output).unwrap_or(false) }
         }
 
         /// What's waiting, as interleaved stereo at 48 kHz; empty when nothing is.
@@ -273,6 +292,17 @@ mod platform {
         }
     }
 
+    unsafe fn output_id(device: &IMMDevice) -> String {
+        match device.GetId() {
+            Ok(id) => {
+                let text = id.to_string().unwrap_or_default();
+                CoTaskMemFree(Some(id.0 as _));
+                text
+            }
+            Err(_) => String::new(),
+        }
+    }
+
     impl Drop for Capture {
         fn drop(&mut self) {
             unsafe {
@@ -291,6 +321,10 @@ mod platform {
     }
 
     impl Capture {
+        pub fn output_changed(&self) -> bool {
+            false
+        }
+
         pub fn open() -> Result<Capture, String> {
             if std::env::var_os("SILL_TEST_TONE").is_none() {
                 return Err("no sound source on this system".into());

@@ -109,6 +109,21 @@ pub fn bounds(id: u32) -> Option<RECT> {
     }
 }
 
+unsafe extern "system" fn add_core_window(h: HWND, found: LPARAM) -> BOOL {
+    if class(h) == "Windows.UI.Core.CoreWindow" {
+        *(found.0 as *mut Option<HWND>) = Some(h);
+        return FALSE;
+    }
+    TRUE
+}
+
+/// The program of the Store app inside a frame window.
+unsafe fn store_app(frame: HWND) -> Option<String> {
+    let mut core: Option<HWND> = None;
+    let _ = EnumChildWindows(frame, Some(add_core_window), LPARAM(&mut core as *mut _ as isize));
+    program(core?)
+}
+
 unsafe extern "system" fn add(h: HWND, list: LPARAM) -> BOOL {
     let list = &mut *(list.0 as *mut Vec<HWND>);
     list.push(h);
@@ -147,8 +162,12 @@ pub fn windows() -> Vec<WindowInfo> {
             if width < 100 || height < 50 {
                 continue;
             }
-            let path = program(h).unwrap_or_default();
-            let app_name = app_name(&path).unwrap_or_else(|| title.clone());
+            // A Store app's window belongs to the frame host; the app itself is in a child window.
+            let mut path = program(h).unwrap_or_default();
+            if c == "ApplicationFrameWindow" {
+                path = store_app(h).unwrap_or_else(|| format!("store:{title}"));
+            }
+            let app_name = if path.starts_with("store:") { title.clone() } else { app_name(&path).unwrap_or_else(|| title.clone()) };
             out.push(WindowInfo { id, title, app_name, bundle_id: path, width, height });
         }
     }
@@ -316,7 +335,7 @@ pub fn focus(id: u32) {
     unsafe {
         let h = hwnd(id);
         if IsIconic(h).as_bool() {
-            let _ = ShowWindow(h, SW_RESTORE);
+            let _ = ShowWindowAsync(h, SW_RESTORE);
         }
         // Windows refuses foreground changes from background programs; the second call is the
         // switch Alt+Tab itself uses.
@@ -337,10 +356,10 @@ pub fn command(id: u32, action: &str) {
                 let _ = PostMessageW(h, WM_CLOSE, WPARAM(0), LPARAM(0));
             }
             "minimize" => {
-                let _ = ShowWindow(h, SW_MINIMIZE);
+                let _ = ShowWindowAsync(h, SW_MINIMIZE);
             }
             "fullScreen" => {
-                let _ = ShowWindow(h, if IsZoomed(h).as_bool() { SW_RESTORE } else { SW_MAXIMIZE });
+                let _ = ShowWindowAsync(h, if IsZoomed(h).as_bool() { SW_RESTORE } else { SW_MAXIMIZE });
             }
             _ => {}
         }
@@ -364,8 +383,28 @@ pub fn fit(id: u32, width: f64, height: f64) {
         let mut r = RECT::default();
         if GetWindowRect(h, &mut r).is_ok() {
             let (x, y) = (r.left.clamp(0, (sw - w) as i32), r.top.clamp(0, (sh - ht) as i32));
-            let _ = SetWindowPos(h, None, x, y, w as i32, ht as i32, SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = SetWindowPos(h, None, x, y, w as i32, ht as i32, SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
         }
+    }
+}
+
+/// Whether a window still exists, whatever it looks like at the moment.
+pub fn exists(id: u32) -> bool {
+    id >= DISPLAY_BASE && display(id).is_some() || unsafe { IsWindow(hwnd(id)).as_bool() }
+}
+
+/// Whether this Windows session's screen is locked.
+pub fn locked() -> bool {
+    use windows::Win32::System::RemoteDesktop::*;
+    unsafe {
+        let (mut buffer, mut size) = (windows::core::PWSTR::null(), 0u32);
+        if WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSSessionInfoEx, &mut buffer, &mut size).is_err() || buffer.is_null() {
+            return false;
+        }
+        let info = buffer.0 as *const WTSINFOEXW;
+        let locked = (*info).Level == 1 && (*info).Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK as i32;
+        WTSFreeMemory(buffer.0 as *mut _);
+        locked
     }
 }
 

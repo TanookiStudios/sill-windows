@@ -6,6 +6,7 @@
 use crate::protocol::{self as p, kind, AppInfo, WindowInfo};
 use crate::server::Host;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -90,10 +91,17 @@ pub mod platform {
     pub fn pointer() -> Option<(i32, i32)> {
         None
     }
+    pub fn exists(_: u32) -> bool {
+        false
+    }
+    pub fn locked() -> bool {
+        false
+    }
 }
 
-/// Keeps the window list, thumbnails and icons fresh while anyone is connected.
+/// Keeps the window list and icons fresh while anyone is connected.
 pub fn start(host: Arc<Host>) {
+    start_thumbnails(host.clone());
     std::thread::Builder::new()
         .name("catalog".into())
         .spawn(move || {
@@ -109,49 +117,88 @@ pub fn start(host: Arc<Host>) {
             for a in &apps {
                 remember_icon(&host, &a.bundle_id, &mut sent_icons);
             }
-            *hub.app_list.lock().unwrap() = Some(Arc::new(p::json_message(kind::APP_LIST, &apps)));
-            let mut thumbs: HashMap<u32, u64> = HashMap::new();
-            let mut tick = 0u64;
+            let list = Arc::new(p::json_message(kind::APP_LIST, &apps));
+            *hub.app_list.lock().unwrap() = Some(list.clone());
+            hub.send_all((*list).clone()); // a device that connected during the scan
             loop {
                 std::thread::sleep(Duration::from_secs(1));
-                if hub.client_count() == 0 {
+                let locked = platform::locked();
+                let was = hub.locked.swap(locked, Ordering::SeqCst);
+                if locked != was {
+                    crate::say!("This PC {}.", if locked { "is locked: devices see nothing of it until it's unlocked" } else { "is unlocked" });
+                    hub.send_all(host.window_list());
+                }
+                if hub.client_count() == 0 || locked {
                     continue;
                 }
-                tick += 1;
                 let old = hub.windows.lock().unwrap().clone();
-                let list = stable_order(&old, platform::windows());
+                let source = hub.source.lock().unwrap().clone();
+                let mut list = stable_order(&old, platform::windows());
+                // One look can miss a window (a title changing, say): the one streaming stays
+                // listed for as long as it really exists.
+                if let p::StreamSource::Window { id } = source {
+                    if !list.iter().any(|w| w.id == id) && platform::exists(id) {
+                        list.extend(old.iter().filter(|w| w.id == id).cloned());
+                    }
+                }
                 for w in &list {
                     remember_icon(&host, &w.bundle_id, &mut sent_icons);
                 }
-                let changed = serde_json::to_vec(&list).ok() != serde_json::to_vec(&old).ok();
-                if changed {
+                if serde_json::to_vec(&list).ok() != serde_json::to_vec(&old).ok() {
                     *hub.windows.lock().unwrap() = list.clone();
                     // A streamed window that closed: back to the whole screen.
-                    let source = hub.source.lock().unwrap().clone();
                     if let p::StreamSource::Window { id } = source {
                         if !list.iter().any(|w| w.id == id) {
                             hub.set_source(p::StreamSource::Desktop {});
                         }
                     }
-                    hub.send_all(host.window_list());
-                }
-                if tick % 2 == 0 {
-                    thumbs.retain(|id, _| list.iter().any(|w| w.id == *id));
-                    hub.thumbnails.lock().unwrap().retain(|id, _| list.iter().any(|w| w.id == *id));
-                    for w in list.iter().take(16) {
-                        let Some(jpeg) = platform::thumbnail(w.id) else { continue };
-                        let sum = ring::digest::digest(&ring::digest::SHA256, &jpeg);
-                        let sum = u64::from_be_bytes(sum.as_ref()[..8].try_into().unwrap());
-                        if thumbs.insert(w.id, sum) != Some(sum) {
-                            let m = p::message(kind::THUMBNAIL, p::now(), false, &p::encode_thumbnail(w.id, &jpeg));
-                            hub.thumbnails.lock().unwrap().insert(w.id, Arc::new(m.clone()));
-                            hub.send_all(m);
+                    // An app a device opened: its first new window streams.
+                    let launching = hub.launching.lock().unwrap().clone();
+                    if let Some((at, known)) = launching {
+                        if p::now() - at > 15.0 {
+                            *hub.launching.lock().unwrap() = None;
+                        } else if let Some(new) = list.iter().find(|w| !known.contains(&w.id)) {
+                            *hub.launching.lock().unwrap() = None;
+                            platform::focus(new.id);
+                            hub.set_source(p::StreamSource::Window { id: new.id });
                         }
                     }
+                    hub.send_all(host.window_list());
                 }
             }
         })
         .expect("catalog thread");
+}
+
+/// Thumbnails, on a thread of their own: drawing one waits on its program, and a program that
+/// has just frozen mustn't stop the window list.
+fn start_thumbnails(host: Arc<Host>) {
+    std::thread::Builder::new()
+        .name("thumbnails".into())
+        .spawn(move || {
+            let hub = host.hub.clone();
+            let mut sums: HashMap<u32, u64> = HashMap::new();
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                if hub.client_count() == 0 || hub.locked.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let list = hub.windows.lock().unwrap().clone();
+                sums.retain(|id, _| list.iter().any(|w| w.id == *id));
+                hub.thumbnails.lock().unwrap().retain(|id, _| list.iter().any(|w| w.id == *id));
+                for w in list.iter().take(16) {
+                    let Some(jpeg) = platform::thumbnail(w.id) else { continue };
+                    let sum = ring::digest::digest(&ring::digest::SHA256, &jpeg);
+                    let sum = u64::from_be_bytes(sum.as_ref()[..8].try_into().unwrap());
+                    if sums.insert(w.id, sum) != Some(sum) {
+                        let m = p::message(kind::THUMBNAIL, p::now(), false, &p::encode_thumbnail(w.id, &jpeg));
+                        hub.thumbnails.lock().unwrap().insert(w.id, Arc::new(m.clone()));
+                        hub.send_all(m);
+                    }
+                }
+            }
+        })
+        .expect("thumbnail thread");
 }
 
 fn remember_icon(host: &Host, path: &str, seen: &mut HashMap<String, bool>) {

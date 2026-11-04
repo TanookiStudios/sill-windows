@@ -148,6 +148,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             tokio::select! {
                 _ = timer.tick() => {
                     if hub.stream_changed.swap(false, Ordering::SeqCst) {
+                        hub.send_all(host.window_list());
                         hub.send_all(protocol::json_message(protocol::kind::HOST_SETTINGS, &host.settings_state(None)));
                     }
                     let done = window.lock().unwrap().is_done(protocol::now());
@@ -160,6 +161,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             }
         }
         say!("Quitting: telling connected devices.");
+        let _ = host.input.send(input::Command::Quit);
         server::goodbye_all(&hub).await;
         Ok::<(), String>(())
     })

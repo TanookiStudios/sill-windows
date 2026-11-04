@@ -44,6 +44,9 @@ pub fn start(hub: Arc<Hub>, settings: Settings, rect: Arc<Mutex<Rect>>) {
             let mut last_error = String::new();
             loop {
                 if !hub.wanted() {
+                    if hub.stream.lock().unwrap().take().is_some() {
+                        hub.stream_changed.store(true, Ordering::SeqCst);
+                    }
                     std::thread::sleep(Duration::from_millis(100));
                     continue;
                 }
@@ -123,6 +126,8 @@ struct Pipeline {
     fps: u32,
     /// The streamed window and where it was, when one streams.
     window: Option<(u32, RECT)>,
+    /// The size the encoder was set up for, in screen pixels.
+    encoded: (i32, i32),
     /// The captured monitor on the desktop.
     monitor: RECT,
 }
@@ -146,6 +151,11 @@ impl Pipeline {
                 crate::protocol::StreamSource::Window { id } => crate::catalog::platform::bounds(id),
                 _ => None,
             };
+            // A window that can't be shown right now (minimized) shows nothing: never the whole
+            // screen under that window's name. The picture waits, and comes back with the window.
+            if matches!(source, crate::protocol::StreamSource::Window { .. }) && wanted_bounds.is_none_or(|b| b.right - b.left < 64 || b.bottom - b.top < 64) {
+                return Err("the window streaming is minimized or too small".into());
+            }
             let (adapter, output, desc) = find_output(wanted_bounds.map(|b| ((b.left + b.right) / 2, (b.top + b.bottom) / 2)))?;
             let r = desc.DesktopCoordinates;
             *rect.lock().unwrap() = Rect { left: r.left, top: r.top, width: r.right - r.left, height: r.bottom - r.top };
@@ -177,6 +187,12 @@ impl Pipeline {
                 DXGI_MODE_ROTATION_ROTATE270 => Some(D3D11_VIDEO_PROCESSOR_ROTATION_90),
                 _ => None,
             };
+            // A turned display streams whole, so the list has to stop saying it's the window.
+            if turn.is_some() && matches!(source, crate::protocol::StreamSource::Window { .. }) {
+                hub.set_source(crate::protocol::StreamSource::Desktop {});
+                hub.restart_picture.store(false, Ordering::SeqCst);
+                hub.stream_changed.store(true, Ordering::SeqCst);
+            }
             let (mut uw, mut uh) = if matches!(dd.Rotation, DXGI_MODE_ROTATION_ROTATE90 | DXGI_MODE_ROTATION_ROTATE270) { (dh, dw) } else { (dw, dh) };
             // A window streams as its part of the screen (not on a turned display, or one mostly off this monitor).
             let mut window = None;
@@ -191,7 +207,7 @@ impl Pipeline {
 
             // The picture: the desktop, scaled down so its longer side is at most max_side, even sizes.
             let wish = *hub.settings.lock().unwrap();
-            let fps = wish.max_fps as u32;
+            let fps = hub.stream_fps() as u32;
             let longest = if wish.capture_scale >= 2.0 { settings.max_side } else { settings.max_side.min(uw.max(uh)) / 2 };
             let scale = (longest as f64 / uw.max(uh) as f64).min(1.0);
             // Encoders turn down tiny pictures, so a small window is scaled up a little.
@@ -278,6 +294,7 @@ impl Pipeline {
                 _device: device, context, duplication, desktop, video_context, processor,
                 input_view: input_view.ok_or("video processor input")?, surfaces, next_surface: 0, encoder,
                 fps,
+                encoded: (uw as i32, uh as i32),
                 window,
                 monitor: r,
             })
@@ -294,6 +311,7 @@ impl Pipeline {
         let mut waiting_since: Option<Instant> = None;
         // A keyframe asked of the encoder, and how many had come out by then.
         let mut key_asked: Option<(Instant, u64)> = None;
+        let mut resized: Option<Instant> = None;
         while hub.wanted() {
             if hub.restart_picture.swap(false, Ordering::SeqCst) {
                 return Ok(()); // new settings: the next pipeline takes them
@@ -303,13 +321,22 @@ impl Pipeline {
             if let Some((id, was)) = self.window {
                 let now = crate::catalog::platform::bounds(id).map(|b| clip(b, self.monitor));
                 match now {
-                    Some(c) if c == was => {}
-                    Some(c) if c.right - c.left == was.right - was.left && c.bottom - c.top == was.bottom - was.top => unsafe {
-                        self.video_context.VideoProcessorSetStreamSourceRect(&self.processor, 0, true, Some(&offset(c, self.monitor)));
-                        *rect.lock().unwrap() = Rect { left: c.left, top: c.top, width: c.right - c.left, height: c.bottom - c.top };
-                        self.window = Some((id, c));
-                        dirty = true;
-                    },
+                    Some(c) if c.right - c.left >= 64 && c.bottom - c.top >= 64 => {
+                        if c != was {
+                            unsafe { self.video_context.VideoProcessorSetStreamSourceRect(&self.processor, 0, true, Some(&offset(c, self.monitor))) };
+                            *rect.lock().unwrap() = Rect { left: c.left, top: c.top, width: c.right - c.left, height: c.bottom - c.top };
+                            self.window = Some((id, c));
+                            dirty = true;
+                            if (c.right - c.left, c.bottom - c.top) != self.encoded {
+                                resized = Some(Instant::now());
+                            }
+                        }
+                        // A new size needs a new encoder, once the size has settled: until then the
+                        // picture follows, scaled, rather than freezing for the whole drag.
+                        if resized.is_some_and(|t| t.elapsed() > Duration::from_millis(300)) {
+                            return Ok(());
+                        }
+                    }
                     _ => return Ok(()),
                 }
             }
