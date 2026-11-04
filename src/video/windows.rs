@@ -47,7 +47,7 @@ pub fn start(hub: Arc<Hub>, settings: Settings, rect: Arc<Mutex<Rect>>) {
                     std::thread::sleep(Duration::from_millis(100));
                     continue;
                 }
-                match Pipeline::new(&settings, &hub, &rect).and_then(|mut p| p.run(&hub)) {
+                match Pipeline::new(&settings, &hub, &rect).and_then(|mut p| p.run(&hub, &rect)) {
                     Ok(()) => {}
                     Err(e) => {
                         *hub.video_error.lock().unwrap() = Some(e.clone());
@@ -121,6 +121,20 @@ struct Pipeline {
     next_surface: usize,
     encoder: Encoder,
     fps: u32,
+    /// The streamed window and where it was, when one streams.
+    window: Option<(u32, RECT)>,
+    /// The captured monitor on the desktop.
+    monitor: RECT,
+}
+
+/// The part of `w` on the monitor.
+fn clip(w: RECT, m: RECT) -> RECT {
+    RECT { left: w.left.max(m.left), top: w.top.max(m.top), right: w.right.min(m.right), bottom: w.bottom.min(m.bottom) }
+}
+
+/// A rectangle on the desktop in the captured image's own pixels.
+fn offset(c: RECT, m: RECT) -> RECT {
+    RECT { left: c.left - m.left, top: c.top - m.top, right: c.right - m.left, bottom: c.bottom - m.top }
 }
 
 impl Pipeline {
@@ -157,22 +171,36 @@ impl Pipeline {
                 DXGI_MODE_ROTATION_ROTATE270 => Some(D3D11_VIDEO_PROCESSOR_ROTATION_90),
                 _ => None,
             };
-            let (uw, uh) = if matches!(dd.Rotation, DXGI_MODE_ROTATION_ROTATE90 | DXGI_MODE_ROTATION_ROTATE270) { (dh, dw) } else { (dw, dh) };
+            let (mut uw, mut uh) = if matches!(dd.Rotation, DXGI_MODE_ROTATION_ROTATE90 | DXGI_MODE_ROTATION_ROTATE270) { (dh, dw) } else { (dw, dh) };
+            // A window streams as its part of the screen (not on a turned display, or one mostly off this monitor).
+            let mut window = None;
+            if let (crate::protocol::StreamSource::Window { id }, None) = (hub.source.lock().unwrap().clone(), turn) {
+                if let Some(c) = crate::catalog::platform::bounds(id).map(|b| clip(b, r)).filter(|c| c.right - c.left >= 64 && c.bottom - c.top >= 64) {
+                    uw = (c.right - c.left) as u32;
+                    uh = (c.bottom - c.top) as u32;
+                    *rect.lock().unwrap() = Rect { left: c.left, top: c.top, width: c.right - c.left, height: c.bottom - c.top };
+                    window = Some((id, c));
+                }
+            }
 
             // The picture: the desktop, scaled down so its longer side is at most max_side, even sizes.
-            let scale = (settings.max_side as f64 / uw.max(uh) as f64).min(1.0);
-            let width = ((uw as f64 * scale) as u32) & !1;
-            let height = ((uh as f64 * scale) as u32) & !1;
+            let wish = *hub.settings.lock().unwrap();
+            let fps = wish.max_fps as u32;
+            let longest = if wish.capture_scale >= 2.0 { settings.max_side } else { settings.max_side.min(uw.max(uh)) / 2 };
+            let scale = (longest as f64 / uw.max(uh) as f64).min(1.0);
+            // Encoders turn down tiny pictures, so a small window is scaled up a little.
+            let width = (((uw as f64 * scale) as u32) & !1).max(256);
+            let height = (((uh as f64 * scale) as u32) & !1).max(256);
 
             let desktop = texture(&device, dw, dh, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_RENDER_TARGET)?;
             let video_device: ID3D11VideoDevice = device.cast().map_err(err("no video processor"))?;
             let video_context: ID3D11VideoContext = context.cast().map_err(err("no video processor"))?;
             let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
                 InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-                InputFrameRate: DXGI_RATIONAL { Numerator: settings.fps, Denominator: 1 },
+                InputFrameRate: DXGI_RATIONAL { Numerator: fps, Denominator: 1 },
                 InputWidth: dw,
                 InputHeight: dh,
-                OutputFrameRate: DXGI_RATIONAL { Numerator: settings.fps, Denominator: 1 },
+                OutputFrameRate: DXGI_RATIONAL { Numerator: fps, Denominator: 1 },
                 OutputWidth: width,
                 OutputHeight: height,
                 Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
@@ -185,6 +213,9 @@ impl Pipeline {
             video_context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&whole));
             video_context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&whole));
             video_context.VideoProcessorSetStreamFrameFormat(&processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+            if let Some((_, c)) = window {
+                video_context.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&offset(c, r)));
+            }
             // Full-range RGB in; BT.709 limited-range YCbCr out. The stream itself leaves its colors
             // unspecified, as Chromium's does (setting them on the encoder has crashed AMD drivers),
             // which a decoder reads as BT.709 at HD sizes and up.
@@ -226,26 +257,29 @@ impl Pipeline {
                 surfaces.push((t, view.ok_or("video processor output")?));
             }
 
-            let bitrate = hub.bitrate.load(Ordering::SeqCst) as u32;
-            let encoder = Encoder::new(&device, &adapter, width, height, settings.fps, bitrate)?;
+            let bitrate = (wish.bitrate as u64 * fps as u64 / 60) as u32;
+            let encoder = Encoder::new(&device, &adapter, width, height, fps, bitrate)?;
             *hub.stream.lock().unwrap() = Some(crate::protocol::RunningStream {
                 width: width as i64,
                 height: height as i64,
-                fps: settings.fps as i64,
+                fps: fps as i64,
                 mbps: (bitrate / 1_000_000) as i64,
                 on_virtual_display: false,
             });
-            crate::say!("Streaming the screen: {uw}×{uh} as {width}×{height} at up to {} fps, HEVC on {}.", settings.fps, encoder.name);
+            hub.stream_changed.store(true, Ordering::SeqCst);
+            crate::say!("Streaming {}: {uw}×{uh} as {width}×{height} at up to {fps} fps, HEVC on {}.", if window.is_some() { "a window" } else { "the screen" }, encoder.name);
             Ok(Pipeline {
                 _device: device, context, duplication, desktop, video_context, processor,
                 input_view: input_view.ok_or("video processor input")?, surfaces, next_surface: 0, encoder,
-                fps: settings.fps,
+                fps,
+                window,
+                monitor: r,
             })
         }
     }
 
     /// Runs until nobody is connected (Ok) or the capture or encoder fails (Err: a new pipeline).
-    fn run(&mut self, hub: &Hub) -> Result<()> {
+    fn run(&mut self, hub: &Hub, rect: &Mutex<Rect>) -> Result<()> {
         let interval = Duration::from_secs_f64(1.0 / self.fps as f64);
         let mut next_slot = Instant::now();
         let mut have_image = false;
@@ -255,12 +289,33 @@ impl Pipeline {
         // A keyframe asked of the encoder, and how many had come out by then.
         let mut key_asked: Option<(Instant, u64)> = None;
         while hub.wanted() {
+            if hub.restart_picture.swap(false, Ordering::SeqCst) {
+                return Ok(()); // new settings: the next pipeline takes them
+            }
+            // A streamed window: follow it as it moves; a new size means a new encoder, and a
+            // window that's gone or minimized goes back to what the catalog says.
+            if let Some((id, was)) = self.window {
+                let now = crate::catalog::platform::bounds(id).map(|b| clip(b, self.monitor));
+                match now {
+                    Some(c) if c == was => {}
+                    Some(c) if c.right - c.left == was.right - was.left && c.bottom - c.top == was.bottom - was.top => unsafe {
+                        self.video_context.VideoProcessorSetStreamSourceRect(&self.processor, 0, true, Some(&offset(c, self.monitor)));
+                        *rect.lock().unwrap() = Rect { left: c.left, top: c.top, width: c.right - c.left, height: c.bottom - c.top };
+                        self.window = Some((id, c));
+                        dirty = true;
+                    },
+                    _ => return Ok(()),
+                }
+            }
             // 1. A new desktop image, if there is one (waits up to 4 ms).
             unsafe {
                 let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
                 let mut resource: Option<IDXGIResource> = None;
                 match self.duplication.AcquireNextFrame(4, &mut info, &mut resource) {
                     Ok(()) => {
+                        if info.PointerShapeBufferSize > 0 {
+                            pointer_shape(&self.duplication, &info, hub);
+                        }
                         if info.LastPresentTime != 0 || !have_image {
                             if let Some(r) = resource {
                                 let t: ID3D11Texture2D = r.cast().map_err(err("desktop image"))?;
@@ -343,6 +398,28 @@ impl Pipeline {
             self.encoder.encode(surface, timestamp, 10_000_000 / self.fps as i64, keyframe)
         }
     }
+}
+
+/// Hands the pointer's new shape to the hub, in points as a device draws it.
+unsafe fn pointer_shape(duplication: &IDXGIOutputDuplication, info: &DXGI_OUTDUPL_FRAME_INFO, hub: &Hub) {
+    use crate::cursor::{blob, png, to_rgba, Shape};
+    let mut buffer = vec![0u8; info.PointerShapeBufferSize as usize];
+    let mut needed = 0u32;
+    let mut shape = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
+    if duplication.GetFramePointerShape(buffer.len() as u32, buffer.as_mut_ptr() as *mut _, &mut needed, &mut shape).is_err() {
+        return;
+    }
+    let kind = match DXGI_OUTDUPL_POINTER_SHAPE_TYPE(shape.Type as i32) {
+        DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME => Shape::Monochrome,
+        DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR => Shape::Color,
+        _ => Shape::MaskedColor,
+    };
+    let Some((rgba, height)) = to_rgba(kind, shape.Width as usize, shape.Height as usize, shape.Pitch as usize, &buffer) else { return };
+    let Some(image) = png(shape.Width, height as u32, &rgba) else { return };
+    let points = 96.0 / windows::Win32::UI::HiDpi::GetDpiForSystem().max(96) as f32;
+    hub.set_cursor(blob(
+        shape.HotSpot.x as f32 * points, shape.HotSpot.y as f32 * points, shape.Width as f32 * points, height as f32 * points, &image,
+    ));
 }
 
 unsafe fn texture(device: &ID3D11Device, w: u32, h: u32, format: DXGI_FORMAT, bind: D3D11_BIND_FLAG) -> Result<ID3D11Texture2D> {

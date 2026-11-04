@@ -16,18 +16,29 @@ pub mod kind {
     pub const PARAMETER_SETS: u8 = 0;
     pub const FRAME: u8 = 1;
     pub const WINDOW_LIST: u8 = 2;
+    pub const THUMBNAIL: u8 = 3;
+    pub const APP_ICON: u8 = 4;
+    pub const APP_LIST: u8 = 5;
     pub const SELECT_SOURCE: u8 = 6;
+    pub const LAUNCH_APP: u8 = 7;
     pub const INPUT: u8 = 8;
+    pub const VIEWPORT: u8 = 9;
     pub const PING: u8 = 10;
     pub const PONG: u8 = 11;
     pub const CLIENT_STATS: u8 = 12;
     pub const TICK: u8 = 13;
+    pub const CURSOR_SHAPE: u8 = 14;
+    pub const WINDOW_COMMAND: u8 = 15;
     pub const HOST_SETTINGS: u8 = 16;
     pub const CHANGE_SETTINGS: u8 = 17;
+    pub const MAC_INFO: u8 = 18;
     pub const PAIR_REQUEST: u8 = 19;
     pub const PAIR_RESULT: u8 = 20;
     pub const GOODBYE: u8 = 22;
     pub const HELLO: u8 = 23;
+    pub const MAC_POINTER: u8 = 26;
+    pub const GESTURE: u8 = 28;
+    pub const CLIPBOARD: u8 = 32;
     pub const KEYFRAME_REQUEST: u8 = 44;
 }
 
@@ -81,6 +92,16 @@ pub fn encode_parameter_sets(nal_len: u8, sets: &[Vec<u8>]) -> Vec<u8> {
 
 // ---- Host → device -------------------------------------------------------------------------
 
+/// windowID(4) + JPEG.
+pub fn encode_thumbnail(window: u32, jpeg: &[u8]) -> Vec<u8> {
+    [&window.to_be_bytes()[..], jpeg].concat()
+}
+
+/// bundleIDLength(2) + bundleID + PNG.
+pub fn encode_icon(bundle_id: &str, png: &[u8]) -> Vec<u8> {
+    [&(bundle_id.len() as u16).to_be_bytes()[..], bundle_id.as_bytes(), png].concat()
+}
+
 /// StreamSource: `{"none":{}}`, `{"desktop":{}}`, `{"window":{"_0":ID}}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,6 +112,12 @@ pub enum StreamSource {
         #[serde(rename = "_0")]
         id: u32,
     },
+}
+
+impl Default for StreamSource {
+    fn default() -> StreamSource {
+        StreamSource::Desktop {}
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +144,15 @@ pub struct WindowList {
     pub host_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol: Option<i64>,
+    /// 1: this host takes the six trackpad gestures (kind 28).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gestures: Option<i64>,
+    /// 1: this host takes and sends clipboard text (kind 32).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clipboard: Option<i64>,
+    /// 1: this host repeats a held key, so a device sends a hardware keyboard's characters as keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_repeat: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -263,8 +299,102 @@ pub struct ClientStats {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HostSettingsChange {
     pub token: Option<i64>,
+    #[serde(rename = "maxFPS")]
+    pub max_fps: Option<i64>,
+    pub bitrate: Option<i64>,
+    pub capture_scale: Option<f64>,
+}
+
+/// An installed app, for the drawer's "All apps" (kind 5 is a list of these).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppInfo {
+    pub name: String,
+    #[serde(rename = "bundleID")]
+    pub bundle_id: String,
+}
+
+/// Kind 7.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LaunchApp {
+    #[serde(rename = "bundleID")]
+    pub bundle_id: String,
+}
+
+/// Kind 15: "close", "minimize" or "fullScreen".
+#[derive(Debug, Clone, Deserialize)]
+pub struct WindowCommand {
+    pub id: u32,
+    pub action: String,
+}
+
+/// Kind 9: the device's panel in points and the wanted text scale.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Viewport {
+    pub width: f64,
+    pub height: f64,
+    pub scale: Option<f64>,
+}
+
+/// Kind 26: where the PC's pointer is while this device isn't moving it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MacPointer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
+    pub inside: bool,
+    pub seen: u64,
+}
+
+/// Kind 28.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TrackpadGesture {
+    pub gesture: String,
+}
+
+/// Kind 32, both ways: every field optional, left out when nil.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Clipboard {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop: Option<bool>,
+}
+
+/// One way to reach this PC from afar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MacAddress {
+    pub host: String,
+    /// "vpn", "lan" or "internet".
+    pub kind: String,
+    /// "Tailscale", "Wi-Fi"…: where it comes from, as the device shows it.
+    pub via: String,
+}
+
+/// Inside kind 18: who this PC is and how to reach it from afar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacInfo {
+    pub v: i64,
+    #[serde(rename = "macID")]
+    pub mac_id: String,
+    pub name: String,
+    pub issued_at: f64,
+    pub remote_access: bool,
+    pub remote_port: i64,
+    pub internet: bool,
+    pub addresses: Vec<MacAddress>,
+}
+
+/// Kind 18: `info` is the exact JSON bytes of a MacInfo, and `sig` covers those bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedMacInfo {
+    pub info: String,
+    pub key: String,
+    pub sig: String,
 }
 
 /// Text from a device for the console: control characters and bidi overrides dropped, at most

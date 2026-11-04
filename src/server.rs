@@ -41,6 +41,59 @@ struct Client {
     tx: mpsc::UnboundedSender<Out>,
     in_flight: Arc<AtomicUsize>,
     needs_keyframe: bool,
+    /// It asked for what's copied on this PC (kind 32).
+    clipboard: bool,
+    /// How many input messages were read from it, and when it last moved the pointer.
+    inputs: u64,
+    moved_at: f64,
+}
+
+/// What a device may change, and only to Sill's own choices. Kept in `settings.json`.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Settings {
+    pub max_fps: i64,
+    pub bitrate: i64,
+    /// 2: the screen's own detail (up to --max-size). 1: half that, for a slow link.
+    pub capture_scale: f64,
+}
+
+impl Default for Settings {
+    fn default() -> Settings {
+        Settings { max_fps: 60, bitrate: 15_000_000, capture_scale: 2.0 }
+    }
+}
+
+impl Settings {
+    fn path() -> std::path::PathBuf {
+        crate::identity::home().join("settings.json")
+    }
+
+    /// Anything unreadable or out of range falls back to the defaults, field by field.
+    pub fn load() -> Settings {
+        let d = Settings::default();
+        let Ok(s) = std::fs::read(Self::path()).map_err(|_| ()).and_then(|b| serde_json::from_slice::<Settings>(&b).map_err(|_| ())) else { return d };
+        d.with(Some(s.max_fps), Some(s.bitrate), Some(s.capture_scale))
+    }
+
+    pub fn save(&self) {
+        let _ = std::fs::create_dir_all(crate::identity::home());
+        let _ = std::fs::write(Self::path(), serde_json::to_vec_pretty(self).unwrap_or_default());
+    }
+
+    /// `self` with what a device asked for, where it's one of Sill's choices (SettingsChoices).
+    pub fn with(mut self, max_fps: Option<i64>, bitrate: Option<i64>, capture_scale: Option<f64>) -> Settings {
+        const BITRATES: [i64; 7] = [4_000_000, 8_000_000, 15_000_000, 25_000_000, 40_000_000, 80_000_000, 150_000_000];
+        if let Some(v) = max_fps.filter(|v| [60, 120].contains(v)) {
+            self.max_fps = v;
+        }
+        if let Some(v) = bitrate.filter(|v| BITRATES.contains(v)) {
+            self.bitrate = v;
+        }
+        if let Some(v) = capture_scale.filter(|v| *v == 1.0 || *v == 2.0) {
+            self.capture_scale = v;
+        }
+        self
+    }
 }
 
 /// Where frames meet the connected devices.
@@ -51,13 +104,28 @@ pub struct Hub {
     keyframe_wanted: AtomicBool,
     next_id: AtomicU64,
     pub stream: Mutex<Option<p::RunningStream>>,
-    pub bitrate: AtomicU64,
+    /// The settings a device can change (`Settings`), read when the picture starts.
+    pub settings: Mutex<Settings>,
+    /// The settings changed: the running picture stops and starts again with them.
+    pub restart_picture: AtomicBool,
+    /// The running stream changed: the devices hear of it at the next look.
+    pub stream_changed: AtomicBool,
     /// Keeps the picture running with nobody connected, for the startup check.
     pub checking: AtomicBool,
     /// What the check reads: frames and keyframes encoded, and the last thing that went wrong.
     pub frames: AtomicU64,
     pub keyframes: AtomicU64,
     pub video_error: Mutex<Option<String>>,
+    /// What streams: the whole screen unless a device picks a window.
+    pub source: Mutex<p::StreamSource>,
+    pub windows: Mutex<Vec<p::WindowInfo>>,
+    pub icons: Mutex<Vec<Arc<Vec<u8>>>>,
+    pub app_list: Mutex<Option<Arc<Vec<u8>>>>,
+    /// The only paths a device may launch: the ones this PC listed.
+    pub app_paths: Mutex<Vec<String>>,
+    pub viewport: Mutex<Option<p::Viewport>>,
+    cursor: Mutex<Option<Arc<Vec<u8>>>>,
+    last_pointer: Mutex<Option<Option<(f64, f64)>>>,
 }
 
 impl Hub {
@@ -67,7 +135,59 @@ impl Hub {
 
     /// Whether the picture should run: a device is connected, or the startup check is on.
     pub fn wanted(&self) -> bool {
-        self.checking.load(Ordering::SeqCst) || self.client_count() > 0
+        self.checking.load(Ordering::SeqCst) || (self.client_count() > 0 && !matches!(*self.source.lock().unwrap(), p::StreamSource::None {}))
+    }
+
+    /// Whether the source changed. The picture restarts on it; the first frame is a keyframe.
+    pub fn set_source(&self, source: p::StreamSource) -> bool {
+        let mut s = self.source.lock().unwrap();
+        if *s == source {
+            return false;
+        }
+        *s = source;
+        self.restart_picture.store(true, Ordering::SeqCst);
+        self.request_keyframe();
+        true
+    }
+
+    /// The pointer's shape, to every device now and to each one that joins.
+    pub fn set_cursor(&self, blob: Vec<u8>) {
+        let m = Arc::new(p::message(kind::CURSOR_SHAPE, p::now(), false, &blob));
+        let mut c = self.cursor.lock().unwrap();
+        if c.as_ref().is_some_and(|old| old[HEADER_LEN..] == m[HEADER_LEN..]) {
+            return;
+        }
+        *c = Some(m.clone());
+        for client in self.clients.lock().unwrap().values() {
+            let _ = client.tx.send(Out { data: m.clone(), frame: false });
+        }
+    }
+
+    fn note_input(&self, id: u64, moves_pointer: bool) {
+        if let Some(c) = self.clients.lock().unwrap().get_mut(&id) {
+            c.inputs += 1;
+            if moves_pointer {
+                c.moved_at = p::now();
+            }
+        }
+    }
+
+    /// Where the PC's pointer is now (None: off the stream): when it changed, to every device
+    /// that isn't the one moving it. `seen` lets a device drop a report older than its own input.
+    pub fn pointer_sample(&self, place: Option<(f64, f64)>) {
+        let mut last = self.last_pointer.lock().unwrap();
+        if *last == Some(place) {
+            return;
+        }
+        *last = Some(place);
+        let now = p::now();
+        for c in self.clients.lock().unwrap().values() {
+            if now - c.moved_at < 0.5 {
+                continue;
+            }
+            let m = p::MacPointer { x: place.map(|v| v.0), y: place.map(|v| v.1), inside: place.is_some(), seen: c.inputs };
+            let _ = c.tx.send(Out { data: Arc::new(p::json_message(kind::MAC_POINTER, &m)), frame: false });
+        }
     }
 
     pub fn request_keyframe(&self) {
@@ -85,7 +205,7 @@ impl Hub {
 
     fn register(&self, tx: mpsc::UnboundedSender<Out>, in_flight: Arc<AtomicUsize>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        self.clients.lock().unwrap().insert(id, Client { tx, in_flight, needs_keyframe: true });
+        self.clients.lock().unwrap().insert(id, Client { tx, in_flight, needs_keyframe: true, clipboard: false, inputs: 0, moved_at: 0.0 });
         self.request_keyframe();
         id
     }
@@ -97,6 +217,30 @@ impl Hub {
     fn send(&self, id: u64, data: Vec<u8>) {
         if let Some(c) = self.clients.lock().unwrap().get(&id) {
             let _ = c.tx.send(Out { data: Arc::new(data), frame: false });
+        }
+    }
+
+    fn set_clipboard_subscribed(&self, id: u64, on: bool) {
+        if let Some(c) = self.clients.lock().unwrap().get_mut(&id) {
+            c.clipboard = on;
+        }
+    }
+
+    pub fn has_clipboard_subscribers(&self) -> bool {
+        self.clients.lock().unwrap().values().any(|c| c.clipboard)
+    }
+
+    /// Text to every subscriber but the device it came from.
+    pub fn send_clipboard(&self, text: &str, except: Option<u64>) {
+        let m = p::json_message(kind::CLIPBOARD, &p::Clipboard { text: Some(text.to_string()), stop: None });
+        if m.len() - HEADER_LEN > p::MAX_CLIENT_PAYLOAD {
+            return; // JSON can be far longer than its text: too long to send
+        }
+        let m = Arc::new(m);
+        for (id, c) in self.clients.lock().unwrap().iter() {
+            if c.clipboard && Some(*id) != except {
+                let _ = c.tx.send(Out { data: m.clone(), frame: false });
+            }
         }
     }
 
@@ -154,9 +298,10 @@ pub struct Host {
     pub name: String,
     pub launch_id: String,
     pub hub: Arc<Hub>,
-    pub input: mpsc::UnboundedSender<p::InputEvent>,
+    pub input: std::sync::mpsc::Sender<crate::input::Command>,
     /// Always open; main puts up a new one once it is used, stopped or expired.
     pub pairing: Arc<Mutex<pairing::Window>>,
+    pub port: u16,
     session_tls: Arc<rustls::ServerConfig>,
     pairing_tls: Arc<rustls::ServerConfig>,
 }
@@ -164,36 +309,60 @@ pub struct Host {
 impl Host {
     pub fn new(
         identity: Identity, trust: Trust, name: String, launch_id: String, hub: Arc<Hub>,
-        input: mpsc::UnboundedSender<p::InputEvent>, pairing: Arc<Mutex<pairing::Window>>,
+        input: std::sync::mpsc::Sender<crate::input::Command>, pairing: Arc<Mutex<pairing::Window>>, port: u16,
     ) -> Result<Host, String> {
         let session_tls = tls::server_config(&identity, tls::SESSION_ALPN, Some(trust.clone()))?;
         let pairing_tls = tls::server_config(&identity, tls::PAIRING_ALPN, None)?;
-        Ok(Host { identity, trust, name, launch_id, hub, input, pairing, session_tls, pairing_tls })
+        Ok(Host { identity, trust, name, launch_id, hub, input, pairing, port, session_tls, pairing_tls })
     }
 
     pub fn window_list(&self) -> Vec<u8> {
         p::json_message(kind::WINDOW_LIST, &p::WindowList {
             mac_name: self.name.clone(),
-            windows: vec![],
-            active: p::StreamSource::Desktop {},
+            windows: self.hub.windows.lock().unwrap().clone(),
+            active: self.hub.source.lock().unwrap().clone(),
             launch_id: Some(self.launch_id.clone()),
             // Sill's test scripts refuse a host that names a version (a real host would act on their
             // input); the Mac test host leaves it out, as SillHost does.
             host_version: std::env::var_os("SILL_TEST_NO_VERSION").is_none().then(|| env!("CARGO_PKG_VERSION").into()),
             protocol: Some(1),
+            gestures: Some(1),
+            clipboard: Some(1),
+            key_repeat: Some(1),
         })
     }
 
+    /// Kind 18: who this PC is and how to reach it from afar, signed with its key. A device saves
+    /// it for this PC only when the key of the session it came on signed it.
+    pub fn mac_info(&self) -> Option<Vec<u8>> {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        let info = p::MacInfo {
+            v: 1,
+            mac_id: pairing::mac_id(&self.identity.fingerprint),
+            name: self.name.clone(),
+            issued_at: p::now(),
+            remote_access: true,
+            remote_port: self.port as i64,
+            internet: false,
+            addresses: crate::net::addresses(),
+        };
+        let bytes = serde_json::to_vec(&info).ok()?;
+        let sig = self.identity.sign(&bytes)?;
+        Some(p::json_message(kind::MAC_INFO, &p::SignedMacInfo { info: STANDARD.encode(&bytes), key: STANDARD.encode(&self.identity.point), sig: STANDARD.encode(sig) }))
+    }
+
     pub fn settings_state(&self, answering: Option<i64>) -> p::HostSettingsState {
+        let s = *self.hub.settings.lock().unwrap();
         p::HostSettingsState {
             settings: p::StreamSettings {
-                max_fps: 60,
-                bitrate: self.hub.bitrate.load(Ordering::SeqCst) as i64,
-                capture_scale: 1.0,
+                max_fps: s.max_fps,
+                bitrate: s.bitrate,
+                capture_scale: s.capture_scale,
                 prioritize_speed: true,
                 virtual_display: false,
             },
-            persistent: false,
+            persistent: true,
             virtual_display_available: false,
             virtual_display_note: Some("Not available on Windows.".into()),
             software_encoder: false,
@@ -354,11 +523,24 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
     // The catalog goes first, before any frame: the window list, then the settings.
     let _ = tx.send(Out { data: Arc::new(host.window_list()), frame: false });
     let _ = tx.send(Out { data: Arc::new(p::json_message(kind::HOST_SETTINGS, &host.settings_state(None))), frame: false });
+    if let Some(info) = host.mac_info() {
+        let _ = tx.send(Out { data: Arc::new(info), frame: false });
+    }
+    for icon in host.hub.icons.lock().unwrap().iter() {
+        let _ = tx.send(Out { data: icon.clone(), frame: false });
+    }
+    if let Some(apps) = host.hub.app_list.lock().unwrap().clone() {
+        let _ = tx.send(Out { data: apps, frame: false });
+    }
+    if let Some(cursor) = host.hub.cursor.lock().unwrap().clone() {
+        let _ = tx.send(Out { data: cursor, frame: false });
+    }
     let id = host.hub.register(tx, in_flight.clone());
     crate::say!("{name} connected from {source}.");
     let mut writing = tokio::spawn(write_loop(writer, rx, in_flight));
     let mut last_keyframe_request = 0.0;
     let mut stats_seen = 0u64;
+    let mut clipboard_arrivals = Vec::new();
     let reason = loop {
         let read = tokio::select! {
             r = timeout(SILENCE_LIMIT, read_message(&mut reader, p::MAX_CLIENT_PAYLOAD)) => r,
@@ -369,11 +551,13 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
             Ok(Err(e)) => break e,
             Err(_) => break "silent for 15 s".to_string(),
         };
+        let _ = host.input.send(crate::input::Command::Heard);
         match h.kind {
             kind::PING => host.hub.send(id, p::message(kind::PONG, h.timestamp, false, &payload)),
             kind::INPUT => match serde_json::from_slice::<p::InputEvent>(&payload) {
                 Ok(e) => {
-                    let _ = host.input.send(e);
+                    host.hub.note_input(id, matches!(e, p::InputEvent::Pointer { .. } | p::InputEvent::Scroll { .. }));
+                    let _ = host.input.send(crate::input::Command::Event(e));
                 }
                 Err(_) => crate::warn!("{name}: an input message didn't decode: {}", String::from_utf8_lossy(&payload)),
             },
@@ -386,13 +570,91 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
                     );
                 }
             }
-            // Only the Desktop streams here: every pick is answered with the list that says so.
-            kind::SELECT_SOURCE => host.hub.send(id, host.window_list()),
+            kind::SELECT_SOURCE => {
+                let Ok(source) = serde_json::from_slice::<p::StreamSource>(&payload) else { continue };
+                // A window that isn't listed (gone a moment ago) keeps what streams now.
+                let known = match source {
+                    p::StreamSource::Window { id } => host.hub.windows.lock().unwrap().iter().any(|w| w.id == id),
+                    _ => true,
+                };
+                if known {
+                    if let p::StreamSource::Window { id } = source {
+                        crate::catalog::platform::focus(id);
+                        fit_to_viewport(&host, id);
+                    }
+                    if host.hub.set_source(source) {
+                        host.hub.send_all(host.window_list());
+                        continue;
+                    }
+                }
+                host.hub.send(id, host.window_list());
+            }
+            kind::VIEWPORT => {
+                let Ok(v) = serde_json::from_slice::<p::Viewport>(&payload) else { continue };
+                let sides = 1.0..=16384.0;
+                if !sides.contains(&v.width) || !sides.contains(&v.height) || v.scale.is_some_and(|s| !(0.25..=4.0).contains(&s)) {
+                    crate::warn!("{name}'s panel size was refused.");
+                    continue;
+                }
+                *host.hub.viewport.lock().unwrap() = Some(v);
+                let source = host.hub.source.lock().unwrap().clone();
+                if let p::StreamSource::Window { id } = source {
+                    fit_to_viewport(&host, id);
+                }
+            }
+            kind::WINDOW_COMMAND => {
+                let Ok(c) = serde_json::from_slice::<p::WindowCommand>(&payload) else { continue };
+                if host.hub.windows.lock().unwrap().iter().any(|w| w.id == c.id) {
+                    crate::catalog::platform::command(c.id, &c.action);
+                }
+            }
+            kind::LAUNCH_APP => {
+                let Ok(a) = serde_json::from_slice::<p::LaunchApp>(&payload) else { continue };
+                // Only what this PC listed: a device's message never names a program to run.
+                if host.hub.app_paths.lock().unwrap().contains(&a.bundle_id) && !crate::catalog::platform::launch(&a.bundle_id) {
+                    crate::warn!("Windows couldn't open that app.");
+                }
+            }
             kind::CHANGE_SETTINGS => {
-                // shortcut: settings are fixed in v0.1; the answer carries the unchanged state, which the
-                // device shows as the PC's choice. Apply maxFPS/bitrate here when the encoder can restart.
-                let token = serde_json::from_slice::<p::HostSettingsChange>(&payload).ok().and_then(|c| c.token);
-                host.hub.send(id, p::json_message(kind::HOST_SETTINGS, &host.settings_state(token)));
+                // Every decodable change gets one answer, carrying its token; a value outside Sill's
+                // choices is left as it was, and the answer shows that. Other devices hear of a change.
+                let Ok(c) = serde_json::from_slice::<p::HostSettingsChange>(&payload) else { continue };
+                let changed = {
+                    let mut s = host.hub.settings.lock().unwrap();
+                    let new = s.with(c.max_fps, c.bitrate, c.capture_scale);
+                    let changed = new != *s;
+                    *s = new;
+                    changed
+                };
+                if changed {
+                    host.hub.settings.lock().unwrap().save();
+                    host.hub.restart_picture.store(true, Ordering::SeqCst);
+                    crate::say!("{name} changed the settings.");
+                }
+                host.hub.send(id, p::json_message(kind::HOST_SETTINGS, &host.settings_state(c.token)));
+            }
+            kind::GESTURE => {
+                if let Ok(g) = serde_json::from_slice::<p::TrackpadGesture>(&payload) {
+                    let _ = host.input.send(crate::input::Command::Gesture(g.gesture));
+                }
+            }
+            kind::CLIPBOARD => {
+                use crate::clipboard::{admits, from_device, write, Ask};
+                match from_device(&payload) {
+                    Ask::Stop => host.hub.set_clipboard_subscribed(id, false),
+                    Ask::Refuse => {}
+                    ask if admits(&mut clipboard_arrivals, p::now()) => {
+                        host.hub.set_clipboard_subscribed(id, true);
+                        if let Ask::Set(text) = ask {
+                            if write(&text) {
+                                host.hub.send_clipboard(&text, Some(id));
+                            } else {
+                                crate::warn!("Couldn't put {name}'s text on the clipboard: another program has it open.");
+                            }
+                        }
+                    }
+                    _ => {} // past the rate: nothing taken
+                }
             }
             kind::KEYFRAME_REQUEST => {
                 let now = p::now();
@@ -414,9 +676,17 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
         }
     };
     host.hub.unregister(id);
+    let _ = host.input.send(crate::input::Command::Left);
     writing.abort();
     crate::say!("{name} left ({reason}).");
     Ok(())
+}
+
+/// A device's text scale for a window: the window takes the panel's size at that scale.
+fn fit_to_viewport(host: &Host, id: u32) {
+    if let Some(p::Viewport { width, height, scale: Some(s) }) = host.hub.viewport.lock().unwrap().clone() {
+        crate::catalog::platform::fit(id, width / s, height / s);
+    }
 }
 
 async fn write_loop<W: AsyncWrite + Unpin>(mut w: W, mut rx: mpsc::UnboundedReceiver<Out>, in_flight: Arc<AtomicUsize>) {

@@ -10,8 +10,7 @@ mod windows;
 
 #[cfg_attr(not(windows), allow(dead_code))]
 pub struct Settings {
-    pub fps: u32,
-    /// The picture's longer side is scaled down to at most this many pixels.
+    /// The picture's longer side is scaled down to at most this many pixels (half at Standard).
     pub max_side: u32,
 }
 

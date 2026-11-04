@@ -65,6 +65,7 @@ fn window_list() -> p::WindowList {
     p::WindowList {
         mac_name: "Test PC".into(), windows: vec![], active: p::StreamSource::Desktop {},
         launch_id: Some("L1".into()), host_version: Some("0.1.0".into()), protocol: Some(1),
+        gestures: None, clipboard: None, key_repeat: None,
     }
 }
 

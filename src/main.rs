@@ -10,7 +10,7 @@ const USAGE: &str = "SillHost — lets Sill on an iPad or iPhone see and control
 
 Usage: SillHost [options]
   --port N            the network port (default 7455)
-  --bitrate MBPS      picture quality in megabits per second (default 15)
+  --bitrate MBPS      picture quality in megabits per second, this run only
   --max-size PIXELS   the picture's longer side at most this many pixels (default 2560)
   --name NAME         the name devices show (default: this PC's name)
   --forget-devices    unpair every iPad and iPhone, then exit
@@ -38,7 +38,7 @@ fn pause_before_exit() {
 
 struct Options {
     port: u16,
-    bitrate_mbps: u32,
+    bitrate_mbps: Option<u32>,
     max_side: u32,
     name: Option<String>,
     forget: bool,
@@ -46,13 +46,13 @@ struct Options {
 }
 
 fn options(args: Vec<String>) -> Result<Options, String> {
-    let mut o = Options { port: 7455, bitrate_mbps: 15, max_side: 2560, name: None, forget: false, check: false };
+    let mut o = Options { port: 7455, bitrate_mbps: None, max_side: 2560, name: None, forget: false, check: false };
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         let mut value = |what: &str| it.next().ok_or(format!("{a} needs {what}"));
         match a.as_str() {
             "--port" => o.port = value("a number")?.parse().map_err(|_| "--port needs a number from 1 to 65535")?,
-            "--bitrate" => o.bitrate_mbps = value("a number")?.parse().ok().filter(|b| (1..=150).contains(b)).ok_or("--bitrate needs 1 to 150")?,
+            "--bitrate" => o.bitrate_mbps = Some(value("a number")?.parse().ok().filter(|b| (1..=150).contains(b)).ok_or("--bitrate needs 1 to 150")?),
             "--max-size" => o.max_side = value("a number")?.parse().ok().filter(|s| (320..=8192).contains(s)).ok_or("--max-size needs 320 to 8192")?,
             "--name" => o.name = Some(protocol::safe_label(&value("a name")?, 64)).filter(|n| !n.is_empty()),
             "--forget-devices" => o.forget = true,
@@ -93,10 +93,17 @@ fn run(args: Vec<String>) -> Result<(), String> {
     }
 
     let hub = Arc::new(server::Hub::default());
-    hub.bitrate.store(o.bitrate_mbps as u64 * 1_000_000, Ordering::SeqCst);
+    {
+        let mut s = hub.settings.lock().unwrap();
+        *s = server::Settings::load();
+        if let Some(mbps) = o.bitrate_mbps {
+            s.bitrate = mbps as i64 * 1_000_000; // this run only, whatever the iPad's Settings say
+        }
+    }
     let rect = Arc::new(Mutex::new(primary_rect()));
     let input = input::start(rect.clone());
-    video::start(hub.clone(), video::Settings { fps: 60, max_side: o.max_side }, rect);
+    let pointer_rect = rect.clone();
+    video::start(hub.clone(), video::Settings { max_side: o.max_side }, rect);
     if o.check {
         network_warning();
         video::check_capture();
@@ -108,6 +115,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
         network_warning();
         check_picture(&checking);
     });
+    sill_windows::clipboard::start(hub.clone());
+    sill_windows::catalog::start_pointer(hub.clone(), pointer_rect);
     let window_up = pair_window::start(trust.count() == 0);
 
     let window = Arc::new(Mutex::new(new_window(&rng)));
@@ -122,7 +131,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
         ring::rand::SecureRandom::fill(&rng, &mut nonce).map_err(|_| "no random source")?;
         pairing::recognition_tag(&identity.recognition_key, nonce)
     };
-    let host = Arc::new(server::Host::new(identity, trust, name.clone(), launch_id, hub.clone(), input, window.clone())?);
+    let host = Arc::new(server::Host::new(identity, trust, name.clone(), launch_id, hub.clone(), input, window.clone(), o.port)?);
+    sill_windows::catalog::start(host.clone());
 
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
@@ -136,6 +146,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
         loop {
             tokio::select! {
                 _ = timer.tick() => {
+                    if hub.stream_changed.swap(false, Ordering::SeqCst) {
+                        hub.send_all(protocol::json_message(protocol::kind::HOST_SETTINGS, &host.settings_state(None)));
+                    }
                     let done = window.lock().unwrap().is_done(protocol::now());
                     if done {
                         *window.lock().unwrap() = new_window(&rng);

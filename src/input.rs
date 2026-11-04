@@ -279,22 +279,152 @@ impl Translator {
     }
 }
 
+/// A device's trackpad gesture as Windows' nearest shortcut. Mission Control is Task View, a Space
+/// is a virtual desktop, Apps is Start, Show Desktop is Show Desktop, and the front app's windows
+/// (no Windows match) is the previous window.
+pub fn gesture_strokes(name: &str) -> Vec<Stroke> {
+    const CTRL: (u16, bool) = (VK_LCONTROL, false);
+    const WIN: (u16, bool) = (VK_LWIN, true);
+    const ALT: (u16, bool) = (VK_LMENU, false);
+    let (mods, key): (&[(u16, bool)], Option<(u16, bool)>) = match name {
+        "swipeUp" => (&[WIN], Some((VK_TAB, false))),
+        "swipeDown" => (&[ALT], Some((VK_TAB, false))),
+        "swipeLeft" => (&[CTRL, WIN], Some((0x27, true))), // the desktop to the right
+        "swipeRight" => (&[CTRL, WIN], Some((0x25, true))), // the desktop to the left
+        "pinch" => (&[WIN], None),
+        "spread" => (&[WIN], Some((0x44, false))), // Win+D
+        _ => return vec![],
+    };
+    let mut s: Vec<Stroke> = mods.iter().map(|&(v, e)| (v, e, true)).collect();
+    if let Some((v, e)) = key {
+        s.extend([(v, e, true), (v, e, false)]);
+    }
+    s.extend(mods.iter().rev().map(|&(v, e)| (v, e, false)));
+    s
+}
+
+/// A held key, repeated as Windows' own keyboard would (an injected key never repeats by itself).
+/// Only while its device is heard from: a network can hold a key's up back, and a key that repeats
+/// until the connection dies types forever (KeyRepeat.swift's rule).
+pub struct Repeat {
+    delay: f64,
+    interval: f64,
+    held: Option<(u16, bool, f64)>,
+    heard: f64,
+}
+
+/// How long a device may go unheard before its held key stops (it pings four times a second).
+const SILENCE: f64 = 0.5;
+
+impl Repeat {
+    pub fn new(delay: f64, interval: f64) -> Repeat {
+        Repeat { delay, interval, held: None, heard: 0.0 }
+    }
+
+    pub fn press(&mut self, stroke: Stroke, now: f64) {
+        self.heard = now;
+        self.held = Some((stroke.0, stroke.1, now + self.delay));
+    }
+
+    pub fn stop(&mut self) {
+        self.held = None;
+    }
+
+    pub fn heard(&mut self, now: f64) {
+        self.heard = now;
+    }
+
+    /// When `tick` next has something to do.
+    pub fn due(&self) -> Option<f64> {
+        self.held.map(|h| h.2)
+    }
+
+    /// The key to press again, if it is due and its device was heard lately.
+    pub fn tick(&mut self, now: f64) -> Option<Stroke> {
+        let (vk, ext, due) = self.held?;
+        if now < due {
+            return None;
+        }
+        if now - self.heard > SILENCE {
+            self.held = None;
+            return None;
+        }
+        self.held = Some((vk, ext, now + self.interval));
+        Some((vk, ext, true))
+    }
+}
+
+/// What the input thread takes.
+pub enum Command {
+    Event(InputEvent),
+    Gesture(String),
+    /// A device was heard from: its held key may go on repeating.
+    Heard,
+    /// A device left: nothing it held stays held.
+    Left,
+}
+
+/// Windows' own keyboard settings: (delay, interval) in seconds.
+fn keyboard_timing() -> (f64, f64) {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        let (mut delay, mut speed) = (1u32, 31u32);
+        let flags = SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0);
+        let _ = SystemParametersInfoW(SPI_GETKEYBOARDDELAY, 0, Some(&mut delay as *mut _ as *mut _), flags);
+        let _ = SystemParametersInfoW(SPI_GETKEYBOARDSPEED, 0, Some(&mut speed as *mut _ as *mut _), flags);
+        // Delay 0–3 is 250 ms to 1 s; speed 0–31 is about 2.5 to 30 repeats a second.
+        return ((delay.min(3) as f64 + 1.0) * 0.25, 1.0 / (2.5 + speed.min(31) as f64 * 27.5 / 31.0));
+    }
+    #[allow(unreachable_code)]
+    (0.5, 1.0 / 30.0)
+}
+
 /// Runs the injector on its own thread: events in order, never blocking the network.
-pub fn start(rect: std::sync::Arc<std::sync::Mutex<Rect>>) -> tokio::sync::mpsc::UnboundedSender<InputEvent> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<InputEvent>();
+pub fn start(rect: std::sync::Arc<std::sync::Mutex<Rect>>) -> std::sync::mpsc::Sender<Command> {
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::{Duration, Instant};
+    let (tx, rx) = std::sync::mpsc::channel::<Command>();
     std::thread::Builder::new()
         .name("input".into())
         .spawn(move || {
             let mut t = Translator::default();
-            while let Some(e) = rx.blocking_recv() {
-                let r = *rect.lock().unwrap();
-                for a in t.translate(&e, r) {
-                    post(a);
+            let (delay, interval) = keyboard_timing();
+            let mut repeat = Repeat::new(delay, interval);
+            let clock = Instant::now();
+            let now = || clock.elapsed().as_secs_f64();
+            loop {
+                let wait = repeat.due().map(|d| (d - now()).max(0.0)).unwrap_or(3600.0);
+                match rx.recv_timeout(Duration::from_secs_f64(wait)) {
+                    Ok(Command::Event(e)) => {
+                        match &e {
+                            InputEvent::Key { hid_usage, down, .. } if !is_modifier_usage(*hid_usage) => match (*down, virtual_key(*hid_usage)) {
+                                (true, Some((vk, ext))) => repeat.press((vk, ext, true), now()),
+                                _ => repeat.stop(),
+                            },
+                            InputEvent::Text { .. } => repeat.stop(),
+                            _ => {}
+                        }
+                        let r = *rect.lock().unwrap();
+                        for a in t.translate(&e, r) {
+                            post(a);
+                        }
+                    }
+                    Ok(Command::Gesture(name)) => post(Action::Keys(gesture_strokes(&name))),
+                    Ok(Command::Heard) => repeat.heard(now()),
+                    Ok(Command::Left) => {
+                        repeat.stop();
+                        post(Action::Keys(t.keys.release_all()));
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        if let Some(s) = repeat.tick(now()) {
+                            post(Action::Keys(vec![s]));
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
                 }
             }
-            for a in [Action::Keys(t.keys.release_all())] {
-                post(a);
-            }
+            post(Action::Keys(t.keys.release_all()));
         })
         .expect("input thread");
     tx
@@ -402,6 +532,33 @@ mod tests {
         assert_eq!(k.key(0x2C, true, COMMAND), vec![(VK_LWIN, true, true), (VK_LWIN, true, false)]);
         assert!(k.key(0x2C, false, COMMAND).is_empty());
         assert_eq!(k.key(0x2C, true, 0), vec![(0x20, false, true)], "plain Space types a space");
+    }
+
+    #[test]
+    fn gestures_are_shortcuts() {
+        assert_eq!(gesture_strokes("swipeUp"), vec![(VK_LWIN, true, true), (VK_TAB, false, true), (VK_TAB, false, false), (VK_LWIN, true, false)]);
+        assert_eq!(gesture_strokes("pinch"), vec![(VK_LWIN, true, true), (VK_LWIN, true, false)]);
+        for g in ["swipeDown", "swipeLeft", "swipeRight", "spread"] {
+            let s = gesture_strokes(g);
+            assert_eq!(s.iter().filter(|k| k.2).count(), s.iter().filter(|k| !k.2).count(), "{g}: every down has its up");
+        }
+        assert!(gesture_strokes("somethingNew").is_empty());
+    }
+
+    #[test]
+    fn held_key_repeats_while_heard() {
+        let mut r = Repeat::new(0.5, 0.1);
+        r.press((0x41, false, true), 0.0);
+        assert_eq!(r.tick(0.4), None, "not before the delay");
+        r.heard(0.45);
+        assert_eq!(r.tick(0.5), Some((0x41, false, true)));
+        assert_eq!(r.due(), Some(0.6));
+        assert_eq!(r.tick(0.55), None);
+        assert_eq!(r.tick(1.5), None, "its device went quiet: it stops");
+        assert_eq!(r.due(), None);
+        r.press((0x41, false, true), 2.0);
+        r.stop();
+        assert_eq!(r.tick(9.0), None, "the key's up ends it");
     }
 
     #[test]

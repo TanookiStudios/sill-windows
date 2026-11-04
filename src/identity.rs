@@ -33,6 +33,8 @@ struct Stored {
 
 pub struct Identity {
     pub pkcs8: Vec<u8>,
+    /// The public key, 65 bytes (04 ‖ X ‖ Y).
+    pub point: Vec<u8>,
     pub fingerprint: [u8; 32],
     pub recognition_key: [u8; 32],
     pub certificate: Vec<u8>,
@@ -64,7 +66,16 @@ impl Identity {
         let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &pkcs8, &rng).map_err(|_| "Identity key is damaged")?;
         let point = pair.public_key().as_ref().to_vec();
         let certificate = self_signed_certificate(&pair, &rng)?;
-        Ok(Identity { fingerprint: fingerprint(&point), pkcs8, recognition_key, certificate })
+        Ok(Identity { fingerprint: fingerprint(&point), pkcs8, point, recognition_key, certificate })
+    }
+}
+
+impl Identity {
+    /// A DER ECDSA P-256 / SHA-256 signature, as kind 18 carries.
+    pub fn sign(&self, message: &[u8]) -> Option<Vec<u8>> {
+        let rng = SystemRandom::new();
+        let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &self.pkcs8, &rng).ok()?;
+        Some(pair.sign(&rng, message).ok()?.as_ref().to_vec())
     }
 }
 
