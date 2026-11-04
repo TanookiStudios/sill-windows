@@ -137,12 +137,15 @@ pub fn start(host: Arc<Host>) {
                 }
                 if tick % 2 == 0 {
                     thumbs.retain(|id, _| list.iter().any(|w| w.id == *id));
+                    hub.thumbnails.lock().unwrap().retain(|id, _| list.iter().any(|w| w.id == *id));
                     for w in list.iter().take(16) {
                         let Some(jpeg) = platform::thumbnail(w.id) else { continue };
                         let sum = ring::digest::digest(&ring::digest::SHA256, &jpeg);
                         let sum = u64::from_be_bytes(sum.as_ref()[..8].try_into().unwrap());
                         if thumbs.insert(w.id, sum) != Some(sum) {
-                            hub.send_all(p::message(kind::THUMBNAIL, p::now(), false, &p::encode_thumbnail(w.id, &jpeg)));
+                            let m = p::message(kind::THUMBNAIL, p::now(), false, &p::encode_thumbnail(w.id, &jpeg));
+                            hub.thumbnails.lock().unwrap().insert(w.id, Arc::new(m.clone()));
+                            hub.send_all(m);
                         }
                     }
                 }

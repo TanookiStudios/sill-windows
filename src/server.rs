@@ -120,6 +120,8 @@ pub struct Hub {
     pub source: Mutex<p::StreamSource>,
     pub windows: Mutex<Vec<p::WindowInfo>>,
     pub icons: Mutex<Vec<Arc<Vec<u8>>>>,
+    /// Each window's latest thumbnail, for a device that joins later.
+    pub thumbnails: Mutex<HashMap<u32, Arc<Vec<u8>>>>,
     pub app_list: Mutex<Option<Arc<Vec<u8>>>>,
     /// The only paths a device may launch: the ones this PC listed.
     pub app_paths: Mutex<Vec<String>>,
@@ -528,6 +530,9 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
     }
     for icon in host.hub.icons.lock().unwrap().iter() {
         let _ = tx.send(Out { data: icon.clone(), frame: false });
+    }
+    for thumbnail in host.hub.thumbnails.lock().unwrap().values() {
+        let _ = tx.send(Out { data: thumbnail.clone(), frame: false });
     }
     if let Some(apps) = host.hub.app_list.lock().unwrap().clone() {
         let _ = tx.send(Out { data: apps, frame: false });
