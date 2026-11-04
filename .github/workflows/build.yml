@@ -26,6 +26,34 @@ jobs:
           $out = & target\release\SillHost.exe --help
           if ($LASTEXITCODE -ne 0 -or -not ($out -match "SillHost")) { throw "SillHost.exe --help failed" }
           $out
+      - name: Picture check (shows how far a machine with no GPU gets)
+        continue-on-error: true
+        env:
+          SILL_HOME: ${{ runner.temp }}\check
+        run: target\release\SillHost.exe --check
+      - name: Pair window, photographed and its QR code scanned
+        continue-on-error: true
+        shell: pwsh
+        env:
+          SILL_HOME: ${{ runner.temp }}\pair
+        run: |
+          $p = Start-Process target\release\SillHost.exe -ArgumentList '--port','17999','--name','CI PC' -PassThru -RedirectStandardOutput pair-out.txt -RedirectStandardError pair-err.txt
+          Start-Sleep 14
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+          $bmp = New-Object System.Drawing.Bitmap $b.Width,$b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Left,$b.Top,0,0,$bmp.Size)
+          $bmp.Save("pair-window.png")
+          Stop-Process $p
+          Get-Content pair-out.txt | Select-String -NotMatch '107m'
+          pip install --quiet opencv-python-headless
+          python -c "import cv2,sys; t,_,_=cv2.QRCodeDetector().detectAndDecode(cv2.imread('pair-window.png')); print('QR says:', t[:24]+'…' if t else 'nothing found'); sys.exit(0 if t.startswith('sill://pair') else 1)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pair-window-photo
+          path: pair-window.png
+          if-no-files-found: ignore
       - name: Package
         shell: pwsh
         run: |

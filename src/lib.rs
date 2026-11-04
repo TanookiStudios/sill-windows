@@ -3,7 +3,9 @@
 
 pub mod identity;
 pub mod input;
+pub mod log;
 pub mod mdns;
+pub mod pair_window;
 pub mod pairing;
 pub mod protocol;
 pub mod server;

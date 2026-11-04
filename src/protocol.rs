@@ -20,6 +20,7 @@ pub mod kind {
     pub const INPUT: u8 = 8;
     pub const PING: u8 = 10;
     pub const PONG: u8 = 11;
+    pub const CLIENT_STATS: u8 = 12;
     pub const TICK: u8 = 13;
     pub const HOST_SETTINGS: u8 = 16;
     pub const CHANGE_SETTINGS: u8 = 17;
@@ -250,6 +251,15 @@ pub struct PairRequest {
     pub proof: String,
     pub name: String,
     pub model: Option<String>,
+}
+
+/// What a device reports once a second: the frames it showed, and how far behind they were.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientStats {
+    pub fps: i64,
+    pub frame_age_ms: i64,
+    pub rtt_ms: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

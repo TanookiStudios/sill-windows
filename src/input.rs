@@ -361,7 +361,7 @@ fn post(action: Action) {
     if !inputs.is_empty() {
         let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
         if sent as usize != inputs.len() {
-            eprintln!("Windows took {sent} of {} input events (another program's window may be running as administrator).", inputs.len());
+            crate::warn!("Windows took {sent} of {} input events (another program's window may be running as administrator).", inputs.len());
         }
     }
 }
@@ -369,7 +369,7 @@ fn post(action: Action) {
 #[cfg(not(windows))]
 fn post(action: Action) {
     if std::env::var_os("SILL_LOG_INPUT").is_some() {
-        println!("input: {action:?}");
+        crate::say!("input: {action:?}");
     }
 }
 

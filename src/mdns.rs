@@ -60,9 +60,9 @@ pub fn advertise(name: &str, port: u16, txt: &[(&str, String)], ipv4: Option<std
 
     unsafe extern "system" fn done(status: u32, _: *const core::ffi::c_void, instance: *const DNS_SERVICE_INSTANCE) {
         if status == 0 {
-            println!("Advertised on the network: Sill on iPad and iPhone can see this PC now.");
+            crate::say!("Advertised on the network: Sill on iPad and iPhone can see this PC now.");
         } else {
-            eprintln!("Couldn't advertise this PC on the network (error {status}); devices won't list it.");
+            crate::warn!("Couldn't advertise this PC on the network (error {status}); devices won't list it.");
         }
         if !instance.is_null() {
             DnsServiceFreeInstance(instance);
@@ -113,6 +113,6 @@ pub struct Advertisement;
 #[cfg(not(windows))]
 pub fn advertise(name: &str, port: u16, txt: &[(&str, String)], _ipv4: Option<std::net::Ipv4Addr>) -> Result<Advertisement, String> {
     let record: Vec<String> = txt.iter().map(|(k, v)| format!("{k}={v}")).collect();
-    println!("(Not on Windows: not advertising \"{name}\" on port {port} with {}.)", record.join(" "));
+    crate::say!("(Not on Windows: not advertising \"{name}\" on port {port} with {}.)", record.join(" "));
     Ok(Advertisement)
 }

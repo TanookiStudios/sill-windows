@@ -37,21 +37,22 @@ pub fn start(hub: Arc<Hub>, settings: Settings, rect: Arc<Mutex<Rect>>) {
             unsafe {
                 let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
                 if let Err(e) = MFStartup(MF_VERSION, MFSTARTUP_FULL) {
-                    eprintln!("Media Foundation didn't start ({e}); no picture can be sent.");
+                    crate::warn!("Media Foundation didn't start ({e}); no picture can be sent.");
                     return;
                 }
             }
             let mut last_error = String::new();
             loop {
-                if hub.client_count() == 0 {
+                if !hub.wanted() {
                     std::thread::sleep(Duration::from_millis(100));
                     continue;
                 }
                 match Pipeline::new(&settings, &hub, &rect).and_then(|mut p| p.run(&hub)) {
                     Ok(()) => {}
                     Err(e) => {
+                        *hub.video_error.lock().unwrap() = Some(e.clone());
                         if e != last_error {
-                            eprintln!("Picture: {e}. Trying again…");
+                            crate::warn!("Picture: {e}. Trying again…");
                             last_error = e;
                         }
                         std::thread::sleep(Duration::from_millis(500));
@@ -180,7 +181,7 @@ impl Pipeline {
                 mbps: (bitrate / 1_000_000) as i64,
                 on_virtual_display: false,
             });
-            println!("Streaming the screen: {uw}×{uh} as {width}×{height} at up to {} fps, HEVC on {}.", settings.fps, encoder.name);
+            crate::say!("Streaming the screen: {uw}×{uh} as {width}×{height} at up to {} fps, HEVC on {}.", settings.fps, encoder.name);
             Ok(Pipeline {
                 _device: device, context, duplication, desktop, video_context, processor,
                 input_view: input_view.ok_or("video processor input")?, surfaces, next_surface: 0, encoder,
@@ -197,7 +198,7 @@ impl Pipeline {
         let mut dirty = false;
         let mut timestamp: i64 = 0;
         let mut waiting_since: Option<Instant> = None;
-        while hub.client_count() > 0 {
+        while hub.wanted() {
             // 1. A new desktop image, if there is one (waits up to 4 ms).
             unsafe {
                 let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
@@ -432,7 +433,7 @@ impl Encoder {
             .filter_map(|(what, r)| r.is_err().then_some(what))
             .collect();
             if !refused.is_empty() {
-                println!("({} kept its own settings for: {}.)", friendly_name(activate), refused.join(", "));
+                crate::say!("({} kept its own settings for: {}.)", friendly_name(activate), refused.join(", "));
             }
         }
         let size = ((width as u64) << 32) | height as u64;

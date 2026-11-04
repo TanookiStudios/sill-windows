@@ -52,11 +52,22 @@ pub struct Hub {
     next_id: AtomicU64,
     pub stream: Mutex<Option<p::RunningStream>>,
     pub bitrate: AtomicU64,
+    /// Keeps the picture running with nobody connected, for the startup check.
+    pub checking: AtomicBool,
+    /// What the check reads: frames and keyframes encoded, and the last thing that went wrong.
+    pub frames: AtomicU64,
+    pub keyframes: AtomicU64,
+    pub video_error: Mutex<Option<String>>,
 }
 
 impl Hub {
     pub fn client_count(&self) -> usize {
         self.clients.lock().unwrap().len()
+    }
+
+    /// Whether the picture should run: a device is connected, or the startup check is on.
+    pub fn wanted(&self) -> bool {
+        self.checking.load(Ordering::SeqCst) || self.client_count() > 0
     }
 
     pub fn request_keyframe(&self) {
@@ -99,6 +110,10 @@ impl Hub {
     /// One encoded access unit (length-prefixed NALs), with the parameter sets when it is a keyframe.
     pub fn broadcast_frame(&self, data: &[u8], is_keyframe: bool, parameter_sets: Option<Vec<u8>>) {
         let now = p::now();
+        self.frames.fetch_add(1, Ordering::SeqCst);
+        if is_keyframe {
+            self.keyframes.fetch_add(1, Ordering::SeqCst);
+        }
         let mut ps_sent = false;
         if let Some(ps) = parameter_sets {
             let m = Arc::new(p::message(kind::PARAMETER_SETS, now, true, &ps));
@@ -162,7 +177,9 @@ impl Host {
             windows: vec![],
             active: p::StreamSource::Desktop {},
             launch_id: Some(self.launch_id.clone()),
-            host_version: Some(env!("CARGO_PKG_VERSION").into()),
+            // Sill's test scripts refuse a host that names a version (a real host would act on their
+            // input); the Mac test host leaves it out, as SillHost does.
+            host_version: std::env::var_os("SILL_TEST_NO_VERSION").is_none().then(|| env!("CARGO_PKG_VERSION").into()),
             protocol: Some(1),
         })
     }
@@ -196,7 +213,7 @@ pub async fn listen(host: Arc<Host>, port: u16) -> Result<(), String> {
         Ok(v6) => {
             tokio::spawn(accept_loop(host, v6));
         }
-        Err(e) => eprintln!("(IPv6 listener not started: {e})"),
+        Err(e) => crate::warn!("(IPv6 listener not started: {e})"),
     }
     Ok(())
 }
@@ -208,12 +225,12 @@ async fn accept_loop(host: Arc<Host>, listener: TcpListener) {
                 let host = host.clone();
                 tokio::spawn(async move {
                     if let Err(e) = connection(host, stream, addr.ip().to_string()).await {
-                        eprintln!("{addr}: {e}");
+                        crate::warn!("{addr}: {e}");
                     }
                 });
             }
             Err(e) => {
-                eprintln!("accept: {e}");
+                crate::warn!("accept: {e}");
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
@@ -290,7 +307,8 @@ fn judge(host: &Host, request: &p::PairRequest, fp_device: &[u8; 32], source: &s
     }
     match request.method.as_str() {
         "ask" => {
-            println!("{who} at {source} asks to pair: the code is on this screen.");
+            crate::say!("{who} at {source} asks to pair: the code is on this screen.");
+            crate::pair_window::bring_up();
             p::PairResult::refused("shown")
         }
         "qr" | "code" => {
@@ -300,10 +318,11 @@ fn judge(host: &Host, request: &p::PairRequest, fp_device: &[u8; 32], source: &s
                 Verdict::Accept(proof_m) => {
                     let model = request.model.as_deref().map(|m| p::safe_label(m, 64));
                     if let Err(e) = host.trust.add(fp_device, if who.is_empty() { "Device".into() } else { who.clone() }, model) {
-                        eprintln!("Couldn't save the paired device: {e}");
+                        crate::warn!("Couldn't save the paired device: {e}");
                         return p::PairResult::refused("closed");
                     }
-                    println!("Paired with {who} ({}).", if request.method == "qr" { "QR code" } else { "typed code" });
+                    crate::say!("Paired with {who} ({}).", if request.method == "qr" { "QR code" } else { "typed code" });
+                    crate::pair_window::hide();
                     p::PairResult {
                         ok: true,
                         proof: Some(b64u(&proof_m)),
@@ -314,7 +333,7 @@ fn judge(host: &Host, request: &p::PairRequest, fp_device: &[u8; 32], source: &s
                     }
                 }
                 Verdict::Reject { tries_left } => {
-                    println!("{who} at {source} used a wrong code ({tries_left} tries left).");
+                    crate::say!("{who} at {source} used a wrong code ({tries_left} tries left).");
                     p::PairResult { tries_left: Some(tries_left), ..p::PairResult::refused("code") }
                 }
                 Verdict::Busy { retry_after } => p::PairResult { retry_after: Some(retry_after), ..p::PairResult::refused("busy") },
@@ -336,9 +355,10 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
     let _ = tx.send(Out { data: Arc::new(host.window_list()), frame: false });
     let _ = tx.send(Out { data: Arc::new(p::json_message(kind::HOST_SETTINGS, &host.settings_state(None))), frame: false });
     let id = host.hub.register(tx, in_flight.clone());
-    println!("{name} connected from {source}.");
+    crate::say!("{name} connected from {source}.");
     let mut writing = tokio::spawn(write_loop(writer, rx, in_flight));
     let mut last_keyframe_request = 0.0;
+    let mut stats_seen = 0u64;
     let reason = loop {
         let read = tokio::select! {
             r = timeout(SILENCE_LIMIT, read_message(&mut reader, p::MAX_CLIENT_PAYLOAD)) => r,
@@ -355,11 +375,11 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
                 Ok(e) => {
                     let _ = host.input.send(e);
                 }
-                Err(_) => eprintln!("{name}: an input message didn't decode: {}", String::from_utf8_lossy(&payload)),
+                Err(_) => crate::warn!("{name}: an input message didn't decode: {}", String::from_utf8_lossy(&payload)),
             },
             kind::HELLO => {
                 if let Ok(hello) = serde_json::from_slice::<p::Hello>(&payload) {
-                    println!(
+                    crate::say!(
                         "{name} is {} with Sill {}.",
                         p::safe_label(hello.device.as_deref().unwrap_or("a device"), 64),
                         p::safe_label(hello.app_version.as_deref().unwrap_or("?"), 16)
@@ -381,12 +401,21 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
                     host.hub.request_keyframe();
                 }
             }
-            _ => {} // viewport, stats, menus, clipboard…: not in v0.1; unknown kinds are skipped
+            kind::CLIENT_STATS => {
+                // What the device really shows: the one line that proves the picture arrives.
+                stats_seen += 1;
+                if stats_seen % 10 == 1 {
+                    if let Ok(s) = serde_json::from_slice::<p::ClientStats>(&payload) {
+                        crate::say!("{name} shows {} frames a second, {} ms behind this PC, network round trip {} ms.", s.fps, s.frame_age_ms, s.rtt_ms);
+                    }
+                }
+            }
+            _ => {} // viewport, menus, clipboard…: not in v0.1; unknown kinds are skipped
         }
     };
     host.hub.unregister(id);
     writing.abort();
-    println!("{name} left ({reason}).");
+    crate::say!("{name} left ({reason}).");
     Ok(())
 }
 

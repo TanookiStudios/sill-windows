@@ -89,12 +89,34 @@ pub fn start(hub: Arc<Hub>, settings: Settings, rect: Arc<Mutex<crate::input::Re
     synthetic(hub, settings, rect);
 }
 
-/// Outside Windows (development and protocol tests): no capture, a stand-in stream of the Swift
-/// fixtures' parameter sets and one tiny keyframe a second, so a client sees the right sequence.
+/// Outside Windows (development and tests): no capture. `SILL_TEST_VIDEO` names an Annex B HEVC
+/// file with an access unit delimiter before each picture, played in a loop at 30 fps through the
+/// same conversion and fan-out as the real encoder's output, so a real Sill app decodes real
+/// video. Without it, a stand-in: the Swift fixtures' parameter sets and one tiny keyframe on request.
 #[cfg(not(windows))]
 fn synthetic(hub: Arc<Hub>, settings: Settings, _rect: Arc<Mutex<crate::input::Rect>>) {
     let _ = settings;
     std::thread::spawn(move || {
+        if let Some(path) = std::env::var_os("SILL_TEST_VIDEO") {
+            let data = std::fs::read(&path).expect("SILL_TEST_VIDEO");
+            let starts = aud_positions(&data);
+            assert!(starts.len() > 1, "SILL_TEST_VIDEO needs access unit delimiters");
+            let mut last_ps = None;
+            loop {
+                for (i, &s) in starts.iter().enumerate() {
+                    let end = starts.get(i + 1).copied().unwrap_or(data.len());
+                    let au = access_unit(&data[s..end]);
+                    if au.parameter_sets.is_some() {
+                        last_ps = au.parameter_sets.clone();
+                    }
+                    let ps = if au.is_keyframe { last_ps.as_ref().map(|p| crate::protocol::encode_parameter_sets(4, p)) } else { None };
+                    if hub.wanted() {
+                        hub.broadcast_frame(&au.frame, au.is_keyframe, ps);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(33));
+                }
+            }
+        }
         let ps = crate::protocol::encode_parameter_sets(4, &[
             hex("40010c01ffff016000000300b0000003000003005dac09"),
             hex("420101016000000300b0000003000003005da00280802d16"),
@@ -102,13 +124,16 @@ fn synthetic(hub: Arc<Hub>, settings: Settings, _rect: Arc<Mutex<crate::input::R
         ]);
         loop {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            if hub.client_count() > 0 && hub.take_keyframe_request() {
+            if hub.wanted() && hub.take_keyframe_request() {
                 hub.broadcast_frame(&[0, 0, 0, 3, 0x26, 0x01, 0xaf], true, Some(ps.clone()));
             }
         }
     });
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+    fn aud_positions(d: &[u8]) -> Vec<usize> {
+        (0..d.len().saturating_sub(4)).filter(|&i| d[i..i + 3] == [0, 0, 1] && (d[i + 3] >> 1) & 0x3f == 35).collect()
     }
 }
 
