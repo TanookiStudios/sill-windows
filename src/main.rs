@@ -131,6 +131,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
         let _advert = mdns::advertise(&name, o.port, &[("p", "1".to_string()), ("r", tag)], ipv4).map_err(|e| eprintln!("{e}")).ok();
         show_pairing(&window, &fingerprint, &name, o.port, window_up);
         let mut timer = tokio::time::interval(std::time::Duration::from_secs(1));
+        let quit = quit_signal();
+        tokio::pin!(quit);
         loop {
             tokio::select! {
                 _ = timer.tick() => {
@@ -140,13 +142,27 @@ fn run(args: Vec<String>) -> Result<(), String> {
                         show_pairing(&window, &fingerprint, &name, o.port, window_up);
                     }
                 }
-                _ = tokio::signal::ctrl_c() => break,
+                _ = &mut quit => break,
             }
         }
         say!("Quitting: telling connected devices.");
         server::goodbye_all(&hub).await;
         Ok::<(), String>(())
     })
+}
+
+/// Ctrl+C, or on Windows closing the console window, which leaves a few seconds to say goodbye.
+async fn quit_signal() {
+    #[cfg(windows)]
+    {
+        let Ok(mut close) = tokio::signal::windows::ctrl_close() else { return std::future::pending().await };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = close.recv() => {}
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 fn new_window(rng: &ring::rand::SystemRandom) -> pairing::Window {
