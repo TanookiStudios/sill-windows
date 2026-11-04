@@ -46,6 +46,8 @@ jobs:
           # Leave the window behind everything else to prove it comes to the front by itself.
           $p = Start-Process target\release\SillHost.exe -ArgumentList '--port','17999','--name','CI-PC' -PassThru -RedirectStandardOutput pair-out.txt -RedirectStandardError pair-err.txt
           Start-Sleep 6
+          pip install --quiet zeroconf
+          python tests/bonjour_probe.py
           Add-Type -AssemblyName System.Windows.Forms,System.Drawing
           $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
           $bmp = New-Object System.Drawing.Bitmap $b.Width,$b.Height

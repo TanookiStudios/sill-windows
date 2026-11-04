@@ -28,8 +28,17 @@ mod imp {
     const TEXT: i32 = 150;
     const MARGIN: i32 = 12;
     const QR_SIZE: i32 = 520;
+    /// The whole window's height beyond the code, at 96 dpi (margins, text, title bar, taskbar).
+    const AROUND: i32 = 250;
     const SHOW: u32 = WM_APP + 1;
     const HIDE: u32 = WM_APP + 2;
+
+    /// The code's side in logical pixels: smaller on a short screen, so the digits stay on it.
+    fn qr_size() -> i32 {
+        let dpi = unsafe { GetDpiForSystem() } as i32;
+        let screen = unsafe { GetSystemMetrics(SM_CYSCREEN) } * 96 / dpi.max(1);
+        QR_SIZE.min(screen - AROUND).max(240)
+    }
 
     fn hwnd() -> Option<HWND> {
         match WINDOW.load(Ordering::SeqCst) {
@@ -71,9 +80,9 @@ mod imp {
             let dpi = GetDpiForSystem() as i32;
             let scale = |v: i32| v * dpi / 96;
             let quiet = 4i32;
-            let cell = (scale(QR_SIZE) / (c.width as i32 + quiet * 2)).max(1);
+            let cell = (scale(qr_size()) / (c.width as i32 + quiet * 2)).max(1);
             let side = cell * (c.width as i32 + quiet * 2);
-            let (x0, y0) = ((scale(QR_SIZE + MARGIN * 2) - side) / 2, scale(MARGIN));
+            let (x0, y0) = ((scale(qr_size() + MARGIN * 2) - side) / 2, scale(MARGIN));
             let black = CreateSolidBrush(COLORREF(0));
             for y in 0..c.width {
                 for x in 0..c.width {
@@ -85,7 +94,7 @@ mod imp {
             }
             let _ = DeleteObject(black);
             let top = y0 + side;
-            let width = scale(QR_SIZE + MARGIN * 2);
+            let width = scale(qr_size() + MARGIN * 2);
             let font = |height: i32, weight: i32| {
                 CreateFontW(
                     -scale(height), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32,
@@ -154,7 +163,7 @@ mod imp {
                 }
                 let dpi = GetDpiForSystem() as i32;
                 let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-                let mut r = RECT { left: 0, top: 0, right: (QR_SIZE + MARGIN * 2) * dpi / 96, bottom: (QR_SIZE + MARGIN * 2 + TEXT) * dpi / 96 };
+                let mut r = RECT { left: 0, top: 0, right: (qr_size() + MARGIN * 2) * dpi / 96, bottom: (qr_size() + MARGIN * 2 + TEXT) * dpi / 96 };
                 let _ = AdjustWindowRect(&mut r, style, false);
                 let Ok(h) = CreateWindowExW(
                     WINDOW_EX_STYLE(0), class, w!("Pair with Sill"), style, CW_USEDEFAULT, CW_USEDEFAULT,
