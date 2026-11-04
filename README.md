@@ -41,28 +41,32 @@ You do this part by hand because downloading needs your GitHub sign-in, which on
 3. Windows may ask whether to let **SillHost** use the network ("Windows Defender Firewall has
    blocked some features"). Tick **Private networks** and click **Allow access**. If you skip this,
    the iPad won't be able to find the PC.
-4. A black window opens. It shows the PC's name, a big **QR code** (a square of black and white
-   blocks), and a **12-digit code** under it. That's how you pair the iPad. Leave this window open
-   the whole time you use Sill. Closing it stops Sill.
+4. Two windows open. The black one is Sill itself: leave it open the whole time you use Sill, because
+   closing it stops Sill. The white one, **Pair with Sill**, shows a big **QR code** (a square of
+   black and white blocks) and a **12-digit code**. That's how you pair the iPad.
+5. Within about 10 seconds the black window should say **Picture check passed**. That means this PC
+   can capture its screen and make the video.
 
-If the window says something went wrong, read the last lines: they say what happened in plain
-words.
+If something goes wrong, read the last lines of the black window: they say what happened in plain
+words. Everything it says is also saved in **Sill-log.txt**, next to SillHost.exe. Your pairing code
+is never saved there.
 
 ## Pair the iPad (once)
 
 1. Open **Sill** on the iPad. Your PC appears in the list by its name, with **Not paired** under it.
 2. Tap the PC's name. The iPad opens its camera.
-3. Point the camera at the QR code in the black window on the PC. In a moment the iPad says it's
-   paired and shows the PC's screen.
+3. Point the camera at the QR code in the white window on the PC. In a moment the iPad says it's
+   paired and shows the PC's screen, and the white window goes away.
    - If the camera won't read the code, tap **Enter Code Instead** on the iPad and type the 12 digits
      shown under the QR code.
    - A code works once, for 5 minutes. After that the window shows a new one by itself.
+   - If you closed the white window, tapping the PC's name on the iPad brings it back.
 4. From now on, tap the PC's name and it connects straight away. No code needed.
 
 ## Using it
 
-Use Sill just as you would with a Mac. Its taps, right-clicks, scrolling and typing all reach
-Windows, and a keyboard attached to the iPad works too.
+Use Sill just as you would with a Mac. Its trackpad, taps, right-clicks, scrolling and typing all
+reach Windows, and a keyboard attached to the iPad works too.
 
 Mac keys become Windows keys like this:
 
@@ -85,15 +89,17 @@ the PC quit.
 
 ## If something goes wrong
 
-- **The PC isn't in the iPad's list.** Check both are on the same Wi‑Fi. Then check the firewall:
+- **The PC isn't in the iPad's list.** Check both are on the same Wi‑Fi. If the black window says
+  Windows calls this network **Public**, open **Settings**, then **Network & internet**, then **Wi‑Fi**
+  (or **Ethernet**), then your network's properties, and choose **Private network**. Then check the firewall:
   open the **Start** menu, type **Allow an app through Windows Firewall**, open it, click
   **Change settings**, find **SillHost** in the list, and tick both boxes next to it. Click **OK**
   and restart SillHost.
 - **The PC is listed but tapping it does nothing, or it says it couldn't connect.** Same firewall
   fix as above. Also make sure the black window is still open on the PC.
-- **The iPad connects but the picture stays black.** Look at the black window on the PC. A line
-  starting with **Picture:** says why. "no hardware HEVC (H.265) encoder" means this PC's
-  graphics chip can't make the video Sill needs.
+- **The black window says Picture check FAILED, or the iPad connects but stays black.** The line
+  says why. "no hardware HEVC (H.265) encoder" means this PC's graphics chip can't make the video
+  Sill needs.
 - **The picture freezes when a "Do you want to allow this app to make changes" box appears, or on
   the lock screen.** Windows hides those screens from every screen-sharing program. The picture
   comes back once they're gone.
@@ -123,31 +129,31 @@ are not in it yet:
 
 ## What has been tested, and how
 
-Be clear on this: **nobody has run this on a real Windows PC with a real iPad yet.** That's the
-next step, and it's yours, because it needs your PC and your iPad.
+**Nobody has run this on a real PC with a real iPad yet.** One piece is still unproven anywhere: the
+step on the PC's graphics chip that turns the screen into HEVC video. It needs a real graphics chip,
+so its first real run will be on your PC. `MORNING.md` is the test sheet for that.
 
-What has been checked:
+Everything else has run for real:
 
-- **The wire format against Sill's own code.** The `conformance` folder builds Sill's Swift protocol
-  code and dumps the exact bytes it makes. The tests check that every message this program sends
-  matches them, and that every message an iPad sends decodes here. Then Sill's own decoders read
-  what this program writes, and must accept all of it. The pairing math (the code, the proofs, the
-  PC ID, the QR link, the Bonjour tag) matches Sill's code to the byte.
-- **Pairing and a session over Apple's own network code.** A test program built on Sill's code and
-  Apple's Network framework (the same TLS the iPad uses) pairs with the typed code, connects, gets
-  the window list, settings, and the video's opening frames, and gets pongs back. A device that
-  isn't paired is refused with exactly the error the Mac app gives (-9825).
-- **Pairing by QR code with Sill's own Python test client** (`Scripts/sillclient.py` in Sill).
-- **The real program on Windows.** GitHub's Windows machine runs every test, including starting
-  SillHost.exe, pairing with it, holding a session, and restarting it to check it keeps its
-  identity and its paired devices.
-
-What has **not** been checked, because GitHub's Windows machines have no graphics chip and no
-screen:
-
-- Screen capture, the HEVC encoder, and the video actually appearing on the iPad.
-- Clicks and typing actually landing on Windows.
-- The iPad finding the PC over Bonjour on a real Wi‑Fi network.
+- **The real Sill app (version 0.6.1 from Sill's source, on a simulated iPad) against this
+  program.** It found the program over Bonjour, showed it as Not paired, asked to pair, took the code,
+  connected, and showed real HEVC video at 1920×1080 and 2560×1440, including frames split into
+  slices and video from Apple's hardware encoder. Its taps, trackpad, scrolling, typing and keys
+  all arrived correctly. It reconnected from its list with no code, and when the program quit it said
+  so properly. Video came from a test file on a Mac, not from Windows.
+- **Real input on real Windows.** GitHub's Windows machine has a real desktop. A test sends a device's
+  input through the running SillHost.exe and reads back what a real window received: a left click on the exact
+  spot, a right click, the wheel, typing with an accent and an emoji, Command-A, Backspace,
+  an arrow key and Shift.
+- **Screen capture on real Windows**, as far as one image into memory.
+- **The pairing window on real Windows**, photographed, with the QR code in the photo read by a
+  standard QR reader.
+- **Bonjour on real Windows.** A separate Bonjour client saw the name, port, addresses and both
+  TXT keys.
+- **Pairing, sessions, and keeping the identity across a restart on real Windows.**
+- **The wire format against Sill's own code.** The `conformance` folder builds Sill's Swift protocol code.
+  Every message this program sends matches its bytes, every message an iPad sends decodes here, and
+  Sill's own decoders accept what this program writes.
 
 ## For developers
 
@@ -162,6 +168,9 @@ with a stand-in video source, which is what the tests use.
 - `swift run SillConformance check ../tests/fixtures/rust`: Sill's decoders over what Rust wrote.
 - `swift run SillConformance dial PORT CODEFILE`: a device's side over Network.framework against a
   running host started with `SILL_TEST_CODE_FILE=CODEFILE`.
+- `SillHost --check` tests screen capture and the encoder, then exits.
+- `SILL_TEST_VIDEO=clip.hevc` (not on Windows) plays an Annex B file with access unit delimiters
+  through the same conversion and fan-out as the encoder's output, for testing with the real app.
 - `SILL_HOME` moves the whole storage folder (identity and paired devices), so a test never
   touches a real one. Normally it's `%LOCALAPPDATA%\Sill`, with the private key sealed by Windows
   (DPAPI) so only your Windows account can read it.
@@ -169,7 +178,8 @@ with a stand-in video source, which is what the tests use.
 The source files: `src/protocol.rs` (the wire format), `src/pairing.rs` (codes, proofs, the
 pairing window), `src/identity.rs` (the key, the certificate, paired devices), `src/tls.rs` and
 `src/server.rs` (the network door and sessions), `src/video/` (capture and HEVC), `src/input.rs`
-(clicks and keys, with the key table), and `src/mdns.rs` (Bonjour).
+(clicks and keys, with the key table), `src/mdns.rs` (Bonjour), `src/pair_window.rs` (the QR
+window), and `src/log.rs` (the log file).
 
 ## Credits and license
 
