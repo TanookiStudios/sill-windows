@@ -1,0 +1,69 @@
+# Testing Sill for Windows
+
+This takes about 10 minutes. It's you doing it because it needs your PC and your iPad, and neither
+is something I can reach from here.
+
+Do one step at a time. If a step goes wrong, stop there and go to **If it goes wrong** at the bottom.
+
+## 1. Get the program onto the PC
+
+1. On the PC, open a web browser and go to
+   **https://github.com/TanookiStudios/sill-windows/actions**. Sign in as TanookiStudios if it asks.
+2. Click the top line in the list that says **Build** and has a green check mark.
+3. Scroll down to **Artifacts** and click **SillHost-windows**. A zip file downloads.
+4. Open your **Downloads** folder, right-click `SillHost-windows.zip`, and choose **Extract All…**,
+   then **Extract**. A new folder opens with `SillHost.exe` inside.
+
+## 2. Start it
+
+1. Double-click **SillHost.exe**.
+2. If a blue box says **Windows protected your PC**, click **More info**, then **Run anyway**.
+3. If Windows asks about the firewall, tick **Private networks** and click **Allow access**.
+
+**You should see** a black window with text in it, and a white window called **Pair with Sill** with a
+big square QR code and 12 digits.
+
+Within about 10 seconds, the black window should say **Picture check passed**.
+This is the first big moment. That line means this PC can capture its screen and make the video.
+
+## 3. Pair the iPad
+
+1. Make sure the iPad is on the same Wi‑Fi as the PC.
+2. Open **Sill** on the iPad. Your PC's name should be in the list, with **Not paired** under it.
+3. Tap it. The iPad offers to scan a code.
+4. Point the iPad at the white window's QR code. If the camera won't read it, tap
+   **Enter Code Instead** and type the 12 digits.
+
+**You should see** your Windows screen appear on the iPad, and the white window disappear.
+
+## 4. Try it
+
+- Drag a finger on the iPad's trackpad area, and watch the pointer move on the PC.
+- Tap to click something.
+- Scroll with two fingers.
+- Open Notepad on the PC, tap into it, tap the keyboard button on the iPad, and type something.
+
+After about 10 seconds, the black window should have a line like
+**iPad shows 58 frames a second, 20 ms behind this PC**. That's the iPad's own report of what it's
+showing, so tell me those numbers.
+
+## 5. Tell me how it went
+
+Tell me which steps worked. If they all did, tell me whether it felt smooth or laggy.
+
+## If it goes wrong
+
+Tell me the step number and what you saw. The most useful thing you can give me is the file called
+**Sill-log.txt**, which sits next to `SillHost.exe`. Double-click it, press **Ctrl+A**, then **Ctrl+C**,
+and paste it to me. A phone photo of the black window works too.
+
+It holds what the program saw and tried, and never contains your pairing code.
+
+These are the two likeliest problems:
+
+- **The PC isn't in the iPad's list.** Look for a line in the black window saying Windows calls this
+  network **Public**. If it's there, open **Settings**, then **Network & internet**, then **Wi‑Fi**
+  (or **Ethernet**), then your network's properties, and choose **Private network**. Then quit
+  SillHost by closing the black window, and start it again.
+- **It says Picture check FAILED.** Don't try to fix it. Just send me the log, because the rest of that
+  line says exactly what failed.
