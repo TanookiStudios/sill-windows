@@ -91,17 +91,23 @@ fn run(args: Vec<String>) -> Result<(), String> {
     if let Some(p) = log::path() {
         say!("This run's log: {}", p.display());
     }
-    network_warning();
 
     let hub = Arc::new(server::Hub::default());
     hub.bitrate.store(o.bitrate_mbps as u64 * 1_000_000, Ordering::SeqCst);
     let rect = Arc::new(Mutex::new(primary_rect()));
     let input = input::start(rect.clone());
     video::start(hub.clone(), video::Settings { fps: 60, max_side: o.max_side }, rect);
-    let picture_ok = check_picture(&hub);
     if o.check {
-        return if picture_ok { Ok(()) } else { Err("the picture check failed (see above)".into()) };
+        network_warning();
+        video::check_capture();
+        return if check_picture(&hub) { Ok(()) } else { Err("the picture check failed (see above)".into()) };
     }
+    // In the background: the door and the pairing window shouldn't wait on these.
+    let checking = hub.clone();
+    std::thread::spawn(move || {
+        network_warning();
+        check_picture(&checking);
+    });
     let window_up = pair_window::start(trust.count() == 0);
 
     let window = Arc::new(Mutex::new(new_window(&rng)));

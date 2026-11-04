@@ -26,6 +26,12 @@ jobs:
           $out = & target\release\SillHost.exe --help
           if ($LASTEXITCODE -ne 0 -or -not ($out -match "SillHost")) { throw "SillHost.exe --help failed" }
           $out
+      - name: Real clicks and typing on this machine's desktop
+        continue-on-error: true
+        env:
+          SILL_E2E_INPUT: "1"
+          SILL_E2E_NO_VIDEO: "1"
+        run: cargo test --release --test end_to_end input_lands_on_windows -- --nocapture
       - name: Picture check (shows how far a machine with no GPU gets)
         continue-on-error: true
         env:
@@ -37,8 +43,9 @@ jobs:
         env:
           SILL_HOME: ${{ runner.temp }}\pair
         run: |
+          # Leave the window behind everything else to prove it comes to the front by itself.
           $p = Start-Process target\release\SillHost.exe -ArgumentList '--port','17999','--name','CI PC' -PassThru -RedirectStandardOutput pair-out.txt -RedirectStandardError pair-err.txt
-          Start-Sleep 14
+          Start-Sleep 6
           Add-Type -AssemblyName System.Windows.Forms,System.Drawing
           $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
           $bmp = New-Object System.Drawing.Bitmap $b.Width,$b.Height

@@ -120,7 +120,8 @@ mod imp {
                 let _ = ShowWindow(h, SW_HIDE);
                 LRESULT(0)
             }
-            // Shown without taking the keyboard: a device's ask must never swallow what someone is typing.
+            // On top of everything (it would otherwise open behind the console), but without taking
+            // the keyboard: a device's ask must never swallow what someone is typing.
             SHOW => {
                 let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
                 let _ = SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -164,7 +165,7 @@ mod imp {
                 };
                 WINDOW.store(h.0 as isize, Ordering::SeqCst);
                 if show {
-                    let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
+                    let _ = PostMessageW(h, SHOW, WPARAM(0), LPARAM(0));
                 }
                 let _ = tx.send(true);
                 let mut msg = MSG::default();

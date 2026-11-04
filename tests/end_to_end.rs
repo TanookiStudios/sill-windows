@@ -229,3 +229,97 @@ async fn session(device: &Device, port: u16, pc_key: [u8; 32]) {
         assert!(keyframe, "parameter sets, then a keyframe");
     }
 }
+
+/// Real clicks, wheel turns and typing on a real Windows desktop, read back from a real window. Only
+/// where `SILL_E2E_INPUT=1` says a desktop is there to use (it moves the mouse and types).
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn input_lands_on_windows() {
+    if std::env::var_os("SILL_E2E_INPUT").is_none() {
+        return;
+    }
+    let dir = scratch();
+    let (home, code_file, port) = (dir.join("home"), dir.join("code.txt"), 18_000 + (std::process::id() % 1000) as u16);
+    let _host = start(&home, port, &code_file);
+    let device = Device::new();
+    let (_, pc_key) = device.dial(port, b"sill-pair/1").await.unwrap();
+    let code = std::fs::read_to_string(&code_file).unwrap();
+    let key = code_key(&code, &pc_key);
+    let k = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &key);
+    let proof = ring::hmac::sign(&k, &[b"sill-pair-v1 device\0".as_slice(), &device.fp, &pc_key].concat()).as_ref().to_vec();
+    let mut paired = false;
+    for _ in 0..20 {
+        let (mut s, _) = device.dial(port, b"sill-pair/1").await.unwrap();
+        if pair_request(&mut s, "code", &proof).await.ok {
+            paired = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(paired, "paired");
+
+    let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/windows_probe.ps1");
+    let mut window = Command::new("powershell")
+        .args(["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&probe)
+        .arg("-Dir")
+        .arg(&dir)
+        .spawn()
+        .unwrap();
+    let place = dir.join("where.json");
+    let end = Instant::now() + Duration::from_secs(30);
+    while !place.exists() && Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let w: serde_json::Value = serde_json::from_slice(&std::fs::read(&place).expect("the probe window opened")).unwrap();
+    let n = |k: &str| w[k].as_f64().unwrap();
+    let (sw, sh) = (n("screenW"), n("screenH"));
+    println!("probe window: {w}");
+
+    let (mut s, _) = device.dial(port, b"sill/1").await.unwrap();
+    let send = |json: serde_json::Value| p::message(kind::INPUT, p::now(), false, &serde_json::to_vec(&json).unwrap());
+    let pointer = |action: &str, x: f64, y: f64| send(serde_json::json!({"pointer": {"_0": action, "x": x / sw, "y": y / sh}}));
+    let key_event = |usage: u16, down: bool, modifiers: u64| send(serde_json::json!({"key": {"hidUsage": usage, "down": down, "modifiers": modifiers}}));
+    let text = |t: &str| send(serde_json::json!({"text": {"_0": t}}));
+    let mut go = Vec::new();
+    // Left and right click in the panel, and the wheel over it.
+    let (px, py) = (n("panelX"), n("panelY"));
+    go.push(pointer("move", px, py));
+    go.push(pointer("leftDown", px, py));
+    go.push(pointer("leftUp", px, py));
+    go.push(pointer("rightDown", px, py));
+    go.push(pointer("rightUp", px, py));
+    go.push(send(serde_json::json!({"scroll": {"x": px / sw, "y": py / sh, "dx": 0.0, "dy": 100.0 / sh}})));
+    // Click the text box, type, select all with Command-A, and type over it.
+    let (tx, ty) = (n("textX"), n("textY"));
+    go.push(pointer("move", tx, ty));
+    go.push(pointer("leftDown", tx, ty));
+    go.push(pointer("leftUp", tx, ty));
+    go.push(text("abc"));
+    go.push(key_event(0x04, true, 1 << 20));
+    go.push(key_event(0x04, false, 0));
+    go.push(text("Hé 😀 x"));
+    go.push(text("\u{8}"));
+    go.push(key_event(0x50, true, 0)); // left arrow, then Shift-less typing lands before the last character
+    go.push(key_event(0x50, false, 0));
+    go.push(key_event(0x07, true, 1 << 17)); // Shift-D
+    go.push(key_event(0x07, false, 0));
+    for m in go {
+        s.write_all(&m).await.unwrap();
+        s.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let events = std::fs::read_to_string(dir.join("events.txt")).unwrap_or_default();
+    let _ = window.kill();
+    let lines: Vec<&str> = events.trim_start_matches('\u{feff}').lines().collect();
+    let last_text = lines.iter().rev().find_map(|l| l.strip_prefix("text ")).expect("something was typed");
+    use base64::Engine;
+    let typed = String::from_utf8(base64::engine::general_purpose::STANDARD.decode(last_text).unwrap()).unwrap();
+    println!("the window saw: {lines:?}\nfinal text: {typed:?}");
+    assert!(lines.iter().any(|l| l.starts_with("down Left")), "left click");
+    assert!(lines.iter().any(|l| l.starts_with("down Right")), "right click");
+    assert!(lines.iter().any(|l| l.starts_with("wheel ") && l[6..].parse::<i32>().unwrap() > 0), "wheel forward");
+    assert_eq!(typed, "Hé 😀D ", "text, Backspace, Command-A as Ctrl-A, an arrow and a Shift key");
+}

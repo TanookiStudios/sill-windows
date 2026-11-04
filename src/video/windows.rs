@@ -63,6 +63,49 @@ pub fn start(hub: Arc<Hub>, settings: Settings, rect: Arc<Mutex<Rect>>) {
         .expect("video thread");
 }
 
+pub fn check_capture() {
+    match unsafe { capture_one_image() } {
+        Ok(text) => crate::say!("Screen capture works: {text}."),
+        Err(e) => crate::warn!("Screen capture FAILED: {e}."),
+    }
+}
+
+/// One desktop image from a plain Direct3D device, with none of the video parts.
+unsafe fn capture_one_image() -> Result<String> {
+    let (adapter, output, _) = main_output()?;
+    let mut device = None;
+    let mut context = None;
+    D3D11CreateDevice(
+        &adapter, D3D_DRIVER_TYPE_UNKNOWN, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        None, D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context),
+    )
+    .map_err(err("the graphics device didn't start"))?;
+    let (device, context) = (device.ok_or("no graphics device")?, context.ok_or("no graphics context")?);
+    let output1: IDXGIOutput1 = output.cast().map_err(err("this Windows can't capture the screen"))?;
+    let duplication = output1.DuplicateOutput(&device).map_err(err("the capture wouldn't start"))?;
+    let dd = duplication.GetDesc();
+    let copy = texture(&device, dd.ModeDesc.Width, dd.ModeDesc.Height, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_RENDER_TARGET)?;
+    let end = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < end {
+        let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+        let mut resource: Option<IDXGIResource> = None;
+        match duplication.AcquireNextFrame(100, &mut info, &mut resource) {
+            Ok(()) => {
+                if let Some(r) = resource {
+                    let t: ID3D11Texture2D = r.cast().map_err(err("desktop image"))?;
+                    context.CopyResource(&copy, &t);
+                }
+                let _ = duplication.ReleaseFrame();
+                let name = adapter.GetDesc1().map(|d| String::from_utf16_lossy(&d.Description).trim_end_matches('\0').to_string()).unwrap_or_default();
+                return Ok(format!("{}×{} from {name}", dd.ModeDesc.Width, dd.ModeDesc.Height));
+            }
+            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {}
+            Err(e) => return Err(format!("the capture stopped: {e}")),
+        }
+    }
+    Err("no image came in 3 seconds".into())
+}
+
 struct Pipeline {
     /// Kept alive for the encoder and the video processor, which use it.
     _device: ID3D11Device,

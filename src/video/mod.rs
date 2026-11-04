@@ -80,6 +80,13 @@ pub fn access_unit(annex_b: &[u8]) -> AccessUnit {
     AccessUnit { frame, parameter_sets, is_keyframe }
 }
 
+/// Says whether the screen can be captured at all, apart from the encoder, so a failed picture
+/// check tells which half failed.
+pub fn check_capture() {
+    #[cfg(windows)]
+    windows::check_capture();
+}
+
 /// Starts the capture and encoder thread. `rect` is kept up to date with the captured monitor's
 /// place on the virtual desktop, for the input mapping.
 pub fn start(hub: Arc<Hub>, settings: Settings, rect: Arc<Mutex<crate::input::Rect>>) {
