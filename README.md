@@ -1,7 +1,7 @@
 # Sill for Windows
 
 Sill for Windows lets the **Sill** app on an iPad or iPhone show your Windows PC's screen and
-control it: tap to click, drag to move the pointer, and type on the iPad's keyboard. It speaks the
+control it: its whole screen or one window, with the keyboard, trackpad gestures, clipboard and sound. It speaks the
 same language as Sill's own Mac app, so the normal Sill app from the App Store works with it as it
 is. Nothing needs changing on the iPad.
 
@@ -17,8 +17,9 @@ This is version 0.1, the first working version. Read **What's not done yet** bef
 
 ## Install it
 
-There is no installer yet. The program is one file, `SillHost.exe`, which GitHub builds for you
-every time the code changes. You download it from GitHub.
+GitHub builds Sill for you every time the code changes, and you download it from there. You can run
+`SillHost.exe` as it is, or run `SillSetup.exe` to install it properly. The installer also sets up
+the firewall for you, adds Sill to the Start menu, and can start it when you sign in.
 
 You do this part by hand because downloading needs your GitHub sign-in, which only you have.
 
@@ -66,7 +67,33 @@ is never saved there.
 ## Using it
 
 Use Sill just as you would with a Mac. Its trackpad, taps, right-clicks, scrolling and typing all
-reach Windows, and a keyboard attached to the iPad works too.
+reach Windows, and a keyboard attached to the iPad works too. Holding a key down repeats it.
+
+- **One window instead of the whole screen.** Open **Apps** on the iPad. Your open windows are
+  there with little pictures, and tapping one brings it to the front and shows just that window.
+  Windows shows it by showing that part of the screen, so if something else covers it on the PC, you
+  see what's covering it. **Desktop** goes back to the whole screen.
+- **Other apps.** **Apps** also lists what's in your Start menu. Tap one to open it. Store apps
+  aren't listed, but their windows are once they're open.
+- **A second monitor.** Extra monitors appear in **Apps** as Display 2, Display 3 and so on.
+- **Copy and paste.** With **Share Clipboard** on in the iPad's Settings, text you copy on either
+  one can be pasted on the other.
+- **Sound.** Turn on **Send Audio** in the iPad's Settings, and what the PC plays comes out of the
+  iPad. The PC keeps playing it too.
+- **Quality.** The iPad's Settings panel changes quality, resolution and frame rate. Sill remembers
+  them.
+- **Away from home.** A paired iPad can reach the PC through Tailscale or another VPN. There's nothing to
+  turn on: Sill tells the iPad its addresses when they connect at home.
+
+Three- and four-finger trackpad gestures do this:
+
+| Gesture             | On Windows                                       |
+|---------------------|--------------------------------------------------|
+| Swipe up            | Task View (all your windows)                     |
+| Swipe down          | Back to the previous window (Alt+Tab)            |
+| Swipe left or right | The next or previous virtual desktop             |
+| Pinch in            | Start                                            |
+| Spread out          | Show the desktop                                 |
 
 Mac keys become Windows keys like this:
 
@@ -112,20 +139,12 @@ the PC quit.
 
 ## What's not done yet
 
-Version 0.1 does the core job: see the whole main screen and control it. These Mac-app features
-are not in it yet:
-
-- Streaming a single window instead of the whole screen, window thumbnails, and the app list.
-- The PC's menus on the iPad, the clipboard (copy on one, paste on the other), and sound.
-- Trackpad gestures (three- and four-finger swipes).
-- More than one monitor: only the main one is shown.
-- The PC's own mouse pointer in the picture. The iPad draws its own pointer instead.
-- Changing quality or frame rate from the iPad's Settings panel. The panel shows the PC's
-  settings, but changes from the iPad are not applied yet. Start SillHost with `--bitrate` and
-  `--max-size` to change them.
-- Holding a key down to repeat it. The iPad types the key once.
-- Pairing over the USB cable, and reaching the PC from outside your home (Remote Access).
-- An installer, a signed program, and starting automatically when Windows starts.
+- The PC's menus on the iPad. Windows apps mostly don't have menus Sill could read.
+- Images on the clipboard: text only, as in Sill itself.
+- The Windows lock screen and administrator prompts: Windows keeps those from every screen-sharing
+  program, so the picture waits until they're gone. You can't unlock the PC from the iPad.
+- Pairing by USB cable, and reaching the PC over the open internet without a VPN.
+- A signed program, so Windows still shows its blue warning the first time.
 
 ## What has been tested, and how
 
@@ -135,27 +154,36 @@ and the hardware encoder). It needs a real graphics chip, so its first real run 
 Two independent reviews compared that code with Microsoft's documentation and with Chromium, FFmpeg
 and others, and fixed what they found. `MORNING.md` is the test sheet.
 
-Everything else has run for real:
+Everything else has run for real. Sound and windows on your PC are the other things to try,
+because sound capture needs a sound card and streaming one window needs the graphics chip.
 
-- **The real Sill app (version 0.6.1 from Sill's source, on a simulated iPad) against this
+- **The real Sill app (version 0.6.1 built from Sill's source, on a simulated iPad) against this
   program.** It found the program over Bonjour, showed it as Not paired, asked to pair, took the code,
   connected, and showed real HEVC video at 1920×1080 and 2560×1440, including frames split into
-  slices and video from Apple's hardware encoder. Its taps, trackpad, scrolling, typing and keys
-  all arrived correctly. It reconnected from its list with no code, and when the program quit it said
-  so properly. Video came from a test file on a Mac, not from Windows.
-- **Real input on real Windows.** GitHub's Windows machine has a real desktop. A test sends a device's
-  input through the running SillHost.exe and reads back what a real window received: a left click on the exact
-  spot, a right click, the wheel, typing with an accent and an emoji, Command-A, Backspace,
-  an arrow key and Shift.
+  slices and video from Apple's hardware encoder. Its taps, trackpad, scrolling, typing, keys and
+  gestures all arrived correctly. Its Apps drawer showed windows, thumbnails, icons and apps. Its
+  Settings panel changed and saved settings. It decoded and played the sound. It reconnected from
+  its list with no code, and when the program quit it said so properly. Video and sound came from
+  test sources on a Mac, not from Windows.
+- **Real input on real Windows.** GitHub's Windows machine has a real desktop. Tests send a device's
+  input through the running SillHost.exe and read back what a real window received: a left click on
+  the exact spot, a right click, the wheel, typing with an accent and an emoji, Command-A, Backspace,
+  an arrow key, Shift, and a held key repeating.
+- **The rest of the PC side on real Windows:** the list of real windows with their names, thumbnails
+  and icons, 152 Start menu apps, the clipboard both ways, the PC's own pointer position, and
+  full screen, minimize and close on a real window. A closed window falls back to the Desktop.
 - **Screen capture on real Windows**, as far as one image into memory.
 - **The pairing window on real Windows**, photographed, with the QR code in the photo read by a
   standard QR reader.
 - **Bonjour on real Windows.** A separate Bonjour client saw the name, port, addresses and both
   TXT keys.
+- **The installer on real Windows.** It installed, added its firewall rule, and uninstalled cleanly.
 - **Pairing, sessions, and keeping the identity across a restart on real Windows.**
+- **The sound encoder against Apple's decoder.** A 440 Hz tone at 0.300 came back at 0.300, with nothing
+  at other frequencies.
 - **The wire format against Sill's own code.** The `conformance` folder builds Sill's Swift protocol code.
   Every message this program sends matches its bytes, every message an iPad sends decodes here, and
-  Sill's own decoders accept what this program writes.
+  Sill's own decoders accept what this program writes, including the signed kind 18.
 
 ## For developers
 
@@ -180,8 +208,9 @@ with a stand-in video source, which is what the tests use.
 The source files: `src/protocol.rs` (the wire format), `src/pairing.rs` (codes, proofs, the
 pairing window), `src/identity.rs` (the key, the certificate, paired devices), `src/tls.rs` and
 `src/server.rs` (the network door and sessions), `src/video/` (capture and HEVC), `src/input.rs`
-(clicks and keys, with the key table), `src/mdns.rs` (Bonjour), `src/pair_window.rs` (the QR
-window), and `src/log.rs` (the log file).
+(clicks, keys, gestures), `src/catalog.rs` and `src/catalog_windows.rs` (windows, thumbnails,
+apps), `src/clipboard.rs`, `src/audio.rs` (sound), `src/cursor.rs` (pointer shapes), `src/net.rs`
+(addresses), `src/mdns.rs` (Bonjour), `src/pair_window.rs` (the QR window), and `src/log.rs`.
 
 ## Credits and license
 
@@ -189,3 +218,7 @@ Sill is by its authors at [github.com/Saffsanity/sill](https://github.com/Saffsa
 Apache License 2.0. This program is a separate Windows host written to work with Sill's iOS app; it
 contains no code from Sill's apps, but its protocol follows Sill's design and its tests build
 Sill's code as the reference. Licensed under the Apache License 2.0 (see `LICENSE`).
+
+Sound uses the Fraunhofer FDK AAC library, under its own license (see `THIRD-PARTY-NOTICES.txt`).
+That license gives no patent rights: AAC patents are licensed separately, which matters if this
+program is ever given or sold to other people.

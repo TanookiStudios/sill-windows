@@ -47,7 +47,20 @@ After about 10 seconds, the black window should have a line like
 **iPad shows 58 frames a second, 20 ms behind this PC**. That's the iPad's own report of what it's
 showing, so tell me those numbers.
 
-## 5. Tell me how it went
+## 5. Try the extras
+
+Do these in any order. Tell me which ones work.
+
+- **One window:** open a program on the PC, tap **Apps** on the iPad, and tap that program's window.
+  The iPad should show just that window. Tap **Desktop** to go back.
+- **Open an app:** in **Apps**, tap something under **All apps**.
+- **Clipboard:** copy some text on the PC, then paste it on the iPad, and try the other way around.
+  **Share Clipboard** has to be on in the iPad's Settings.
+- **Sound:** open **Settings** on the iPad, turn on **Send Audio**, and play something on the PC.
+- **Gestures:** swipe up with three fingers on the trackpad area. Windows' Task View should open.
+- **Quality:** in the iPad's Settings, change the quality. The picture should blink and come back.
+
+## 6. Tell me how it went
 
 Tell me which steps worked. If they all did, tell me whether it felt smooth or laggy.
 
@@ -58,6 +71,8 @@ Tell me the step number and what you saw. The most useful thing you can give me 
 and paste it to me. A phone photo of the black window works too.
 
 It holds what the program saw and tried, and never contains your pairing code.
+
+Sound and single windows are also unproven on a real PC, so don't worry if those need a fix.
 
 These are the two likeliest problems:
 
