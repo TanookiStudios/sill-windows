@@ -416,7 +416,7 @@ impl Host {
                 capture_scale: s.capture_scale,
                 prioritize_speed: true,
                 virtual_display: false,
-                send_audio: Some(s.send_audio),
+                send_audio: Some(cfg!(feature = "sound") && s.send_audio),
             },
             persistent: true,
             virtual_display_available: false,
@@ -424,7 +424,11 @@ impl Host {
             software_encoder: false,
             stream: self.hub.stream.lock().unwrap().clone(),
             answering,
-            audio_note: self.hub.audio_note.lock().unwrap().clone(),
+            audio_note: if cfg!(feature = "sound") {
+                self.hub.audio_note.lock().unwrap().clone()
+            } else {
+                Some("This download of Sill for Windows doesn't include sound.".into())
+            },
             session_paired: Some(true),
         }
     }
@@ -629,7 +633,7 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
             },
             kind::HELLO => {
                 if let Ok(hello) = serde_json::from_slice::<p::Hello>(&payload) {
-                    if hello.audio.as_ref().is_some_and(|a| a.iter().any(|c| c == "aac-eld")) {
+                    if cfg!(feature = "sound") && hello.audio.as_ref().is_some_and(|a| a.iter().any(|c| c == "aac-eld")) {
                         if let Some(c) = host.hub.clients.lock().unwrap().get_mut(&id) {
                             c.audio = true;
                         }

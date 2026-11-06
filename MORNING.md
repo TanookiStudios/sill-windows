@@ -7,12 +7,9 @@ Do one step at a time. If a step goes wrong, stop there and go to **If it goes w
 
 ## 1. Get the program onto the PC
 
-1. On the PC, open a web browser and go to
-   **https://github.com/TanookiStudios/sill-windows/actions**. Sign in as TanookiStudios if it asks.
-2. Click the top line in the list that says **Build** and has a green check mark.
-3. Scroll down to **Artifacts** and click **SillHost-windows**. A zip file downloads.
-4. Open your **Downloads** folder, right-click `SillHost-windows.zip`, and choose **Extract All…**,
-   then **Extract**. A new folder opens with `SillHost.exe` inside.
+1. On the PC, open a web browser and go to **https://sillforwindows.tanookistudios.com**.
+2. Scroll to the bottom and click **Single program**. `SillHost.exe` downloads.
+3. Open your **Downloads** folder. `SillHost.exe` is there.
 
 ## 2. Start it
 
@@ -56,7 +53,7 @@ Do these in any order. Tell me which ones work.
 - **Open an app:** in **Apps**, tap something under **All apps**.
 - **Clipboard:** copy some text on the PC, then paste it on the iPad, and try the other way around.
   **Share Clipboard** has to be on in the iPad's Settings.
-- **Sound:** open **Settings** on the iPad, turn on **Send Audio**, and play something on the PC.
+
 - **Gestures:** swipe up with three fingers on the trackpad area. Windows' Task View should open.
 - **Quality:** in the iPad's Settings, change the quality. The picture should blink and come back.
 
@@ -72,7 +69,7 @@ and paste it to me. A phone photo of the black window works too.
 
 It holds what the program saw and tried, and never contains your pairing code.
 
-Sound and single windows are also unproven on a real PC, so don't worry if those need a fix.
+Single windows are also unproven on a real PC, so don't worry if those need a fix.
 
 These are the two likeliest problems:
 

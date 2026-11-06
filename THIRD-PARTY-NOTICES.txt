@@ -1,6 +1,7 @@
 Third-party software in Sill for Windows
 
-This program includes the Fraunhofer FDK AAC Codec Library, used to encode the PC's sound. Its
+The published downloads do not include sound. A build made with `--features sound` includes the
+Fraunhofer FDK AAC Codec Library, used to encode the PC's sound. Its
 source code is freely available in the fdk-aac-sys package (https://crates.io/crates/fdk-aac-sys) and
 at https://github.com/mstorsjo/fdk-aac. Its license follows.
 

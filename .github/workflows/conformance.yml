@@ -28,7 +28,7 @@ jobs:
           cd conformance
           SILL_PATH="$RUNNER_TEMP/sill" swift run -q SillConformance dump "$RUNNER_TEMP/fixtures"
           cd ..
-          SWIFT_FIXTURES="$RUNNER_TEMP/fixtures" cargo test --test conformance
+          SWIFT_FIXTURES="$RUNNER_TEMP/fixtures" cargo test --features sound --test conformance
       - name: Rust output, decoded by Sill's code
         run: cd conformance && SILL_PATH="$RUNNER_TEMP/sill" swift run -q SillConformance check ../tests/fixtures/rust
       - name: End to end over Network.framework and with Sill's own test client

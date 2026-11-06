@@ -1,7 +1,7 @@
 # Sill for Windows
 
 Sill for Windows lets the **Sill** app on an iPad or iPhone show your Windows PC's screen and
-control it: its whole screen or one window, with the keyboard, trackpad gestures, clipboard and sound. It speaks the
+control it: its whole screen or one window, with the keyboard, trackpad gestures and clipboard. It speaks the
 same language as Sill's own Mac app, so the normal Sill app from the App Store works with it as it
 is. Nothing needs changing on the iPad.
 
@@ -17,22 +17,12 @@ This is version 0.1, the first working version. Read **What's not done yet** bef
 
 ## Install it
 
-GitHub builds Sill for you every time the code changes, and you download it from there. You can run
-`SillHost.exe` as it is, or run `SillSetup.exe` to install it properly. The installer also sets up
-the firewall for you, adds Sill to the Start menu, and can start it when you sign in.
+Go to **https://sillforwindows.tanookistudios.com** on the Windows PC and click **Download for
+Windows**. That gets `SillSetup.exe`, the installer. It sets up the firewall for you, adds Sill to the
+Start menu, and can start it when you sign in.
 
-You do this part by hand because downloading needs your GitHub sign-in, which only you have.
-
-1. On the Windows PC, open a web browser and go to
-   **https://github.com/TanookiStudios/sill-windows/actions**.
-   If GitHub asks you to sign in, sign in as TanookiStudios.
-2. You'll see a list of builds. Click the top one named **Build** that has a **green check mark**
-   next to it.
-3. Scroll down to the section called **Artifacts**. Click **SillHost-windows**.
-   A file called `SillHost-windows.zip` downloads.
-4. Open your **Downloads** folder. Right-click `SillHost-windows.zip` and choose **Extract All…**,
-   then click **Extract**. A folder opens with `SillHost.exe` in it.
-5. Move that folder somewhere you'll find it again, such as your Desktop.
+If you'd rather not install anything, the same page has **Single program**, which gets
+`SillHost.exe`. Put it in any folder and run it from there. The steps below use that one.
 
 ## Start it the first time
 
@@ -79,8 +69,9 @@ reach Windows, and a keyboard attached to the iPad works too. Holding a key down
 - **A second monitor.** Extra monitors appear in **Apps** as Display 2, Display 3 and so on.
 - **Copy and paste.** With **Share Clipboard** on in the iPad's Settings, text you copy on either
   one can be pasted on the other.
-- **Sound.** Turn on **Send Audio** in the iPad's Settings, and what the PC plays comes out of the
-  iPad. The PC keeps playing it too.
+- **Sound isn't in the downloads.** The code for it is here, but it's only included if you build the
+  program yourself with `cargo build --release --features sound`. Windows has no built-in encoder for
+  the format Sill needs, and the free one's license doesn't cover the AAC patents.
 - **Quality.** The iPad's Settings panel changes quality, resolution and frame rate. Sill remembers
   them.
 - **Away from home.** A paired iPad can reach the PC through Tailscale or another VPN. There's nothing to
@@ -192,7 +183,7 @@ because sound capture needs a sound card and streaming one window needs the grap
 The host is Rust. Everything platform-specific is behind `cfg(windows)`; on other systems it builds
 with a stand-in video source, which is what the tests use.
 
-- `cargo test`: unit tests, the conformance tests against `tests/fixtures/swift`, and the
+- `cargo test --features sound`: unit tests, the conformance tests against `tests/fixtures/swift`, and the
   end-to-end test that runs the real program.
 - `cd conformance && swift run SillConformance dump ../tests/fixtures/swift`: fresh fixtures from
   Sill's Swift code (macOS; `SILL_PATH` points at a checkout of
@@ -221,6 +212,10 @@ Apache License 2.0. This program is a separate Windows host written to work with
 contains no code from Sill's apps, but its protocol follows Sill's design and its tests build
 Sill's code as the reference. Licensed under the Apache License 2.0 (see `LICENSE`).
 
-Sound uses the Fraunhofer FDK AAC library, under its own license (see `THIRD-PARTY-NOTICES.txt`).
+Sound uses the Fraunhofer FDK AAC library, under its own license (see `THIRD-PARTY-NOTICES.txt`). It
+is only compiled with `--features sound`, is not in the published downloads, and its license grants
+no patent rights, so check the AAC patent terms before distributing a build with it.
+
+This is an independent project, not made, endorsed or supported by Sill's developer.
 That license gives no patent rights: AAC patents are licensed separately, which matters if this
 program is ever given or sold to other people.
