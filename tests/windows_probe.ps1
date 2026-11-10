@@ -12,6 +12,15 @@ $p.Location = '20,80'; $p.Size = '460,280'; $p.BackColor = 'LightBlue'
 $f.Controls.Add($t); $f.Controls.Add($p)
 $log = Join-Path $Dir 'events.txt'
 $note = { param($s) Add-Content -Path $log -Value $s -Encoding UTF8 }
+# A classic menu bar (a real HMENU), for the menus test.
+$mm = New-Object System.Windows.Forms.MainMenu
+$file = $mm.MenuItems.Add('&File')
+$save = New-Object System.Windows.Forms.MenuItem('&Save', [EventHandler]{ & $note 'menu save' }, [System.Windows.Forms.Shortcut]::CtrlS)
+$file.MenuItems.Add($save) | Out-Null
+$file.MenuItems.Add('-') | Out-Null
+$print = $file.MenuItems.Add('&Print...'); $print.Enabled = $false
+$auto = $file.MenuItems.Add('&Autosave'); $auto.Checked = $true
+$f.Menu = $mm
 $t.Add_TextChanged({ & $note ("text " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($t.Text))) })
 $p.Add_MouseDown({ param($s, $e) & $note ("down " + $e.Button + " " + $e.X + " " + $e.Y) })
 $p.Add_MouseEnter({ $p.Focus() | Out-Null })

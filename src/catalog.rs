@@ -128,6 +128,9 @@ pub fn start(host: Arc<Host>) {
                     crate::say!("This PC {}.", if locked { "is locked: devices see nothing of it until it's unlocked" } else { "is unlocked" });
                     hub.send_all(host.window_list());
                 }
+                if hub.has_menu_subscribers() {
+                    hub.refresh_menus();
+                }
                 if hub.client_count() == 0 || locked {
                     continue;
                 }

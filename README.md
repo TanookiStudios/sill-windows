@@ -69,6 +69,11 @@ reach Windows, and a keyboard attached to the iPad works too. Holding a key down
 - **A second monitor.** Extra monitors appear in **Apps** as Display 2, Display 3 and so on.
 - **Copy and paste.** With **Share Clipboard** on in the iPad's Settings, text you copy on either
   one can be pasted on the other.
+- **Menus.** The **Menus** button in Sill's bar shows the menus of the window you're using, and
+  tapping an item chooses it on the PC. This works for programs with classic Windows menus, such as
+  Device Manager, Notepad++, 7-Zip, Audacity and FileZilla. Most newer apps, like Chrome, Office,
+  File Explorer and the new Notepad, draw their own menus, and Windows gives no way to read those,
+  so Sill says so instead. Programs running as administrator can't be controlled this way either.
 - **Sound isn't in the downloads.** The code for it is here, but it's only included if you build the
   program yourself with `cargo build --release --features sound`. Windows has no built-in encoder for
   the format Sill needs, and the free one's license doesn't cover the AAC patents.
@@ -131,12 +136,14 @@ the PC quit.
 
 ## What's not done yet
 
-- The PC's menus on the iPad. Windows apps mostly don't have menus Sill could read.
+- Menus of apps that draw their own instead of using Windows' classic menus (see **Menus** above).
 - Images on the clipboard: text only, as in Sill itself.
 - The Windows lock screen and administrator prompts: Windows keeps those from every screen-sharing
   program, so the picture waits until they're gone. You can't unlock the PC from the iPad. While the
   PC is locked, the iPad gets no windows, sound or clipboard, and can't open or close anything.
-- Pairing by USB cable, and reaching the PC over the open internet without a VPN.
+- Pairing by USB cable isn't set up the way the Mac does it. The iPad may still find the PC over the
+  cable if Apple's Windows app (Apple Devices, from the Microsoft Store) is installed, but that's
+  untested. Reaching the PC over the open internet without a VPN isn't possible, as with Sill on a Mac.
 - A signed program, so Windows still shows its blue warning the first time.
 
 ## What has been tested, and how

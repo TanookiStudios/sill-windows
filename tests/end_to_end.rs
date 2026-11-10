@@ -456,6 +456,46 @@ async fn catalog_and_clipboard_on_windows() {
     let list: serde_json::Value = serde_json::from_slice(seen[&kind::WINDOW_LIST].last().unwrap()).unwrap();
     assert_eq!(list["active"]["window"]["_0"].as_u64(), Some(id as u64), "{}", list["active"]);
 
+    // The window's menus: the top level, one menu's items, and a choice landing in the window.
+    let ask = |k: u8, v: serde_json::Value| p::message(k, p::now(), false, &serde_json::to_vec(&v).unwrap());
+    let answer = |seen: &HashMap<u8, Vec<Vec<u8>>>, token: i64| -> serde_json::Value {
+        seen.get(&kind::MAC_MENU).into_iter().flatten().map(|m| serde_json::from_slice::<serde_json::Value>(m).unwrap())
+            .find(|m| m["answering"] == token).unwrap_or_else(|| panic!("an answer to menu request {token}"))
+    };
+    s.write_all(&ask(kind::FETCH_MENU, serde_json::json!({"token": 1}))).await.unwrap();
+    s.flush().await.unwrap();
+    gather(&mut s, 1.0, &mut seen).await;
+    let top = answer(&seen, 1);
+    println!("menus: {top}");
+    let version = top["version"].as_i64().unwrap();
+    let file = top["menus"].as_array().unwrap().iter().find(|m| m["title"] == "File").expect("File in the menu bar");
+    assert_eq!(file["submenu"], true);
+    s.write_all(&ask(kind::FETCH_MENU, serde_json::json!({"version": version, "id": file["id"], "title": "File", "token": 2}))).await.unwrap();
+    s.flush().await.unwrap();
+    gather(&mut s, 1.0, &mut seen).await;
+    let menu = answer(&seen, 2);
+    println!("File: {menu}");
+    let items = menu["items"].as_array().expect("File's items");
+    let item = |t: &str| items.iter().find(|i| i["title"] == t).unwrap_or_else(|| panic!("{t} in File: {menu}")).clone();
+    assert_eq!(item("Save")["key"], "⌘S", "Ctrl+S drawn as a Mac draws it");
+    assert!(items.iter().any(|i| i["separator"] == true), "the separator");
+    assert_eq!(item("Print…")["enabled"], false, "a dimmed item");
+    assert_eq!(item("Autosave")["mark"], "✓", "a checked item");
+    for (token, title, pressed) in [(3, "Save", true), (4, "Print…", false)] {
+        s.write_all(&ask(kind::PRESS_MENU_ITEM, serde_json::json!({"version": version, "id": item(title)["id"], "title": title, "token": token}))).await.unwrap();
+        s.flush().await.unwrap();
+        gather(&mut s, 1.0, &mut seen).await;
+        let a = answer(&seen, token);
+        println!("{title}: {a}");
+        assert_eq!(a["pressed"], pressed, "{a}");
+    }
+    s.write_all(&ask(kind::PRESS_MENU_ITEM, serde_json::json!({"version": version, "id": item("Save")["id"], "title": "Not Save", "token": 5}))).await.unwrap();
+    s.flush().await.unwrap();
+    gather(&mut s, 0.8, &mut seen).await;
+    assert_eq!(answer(&seen, 5)["note"], "The menus changed. Open the menu again.", "a title that no longer matches");
+    let events = std::fs::read_to_string(dir.join("events.txt")).unwrap_or_default();
+    assert_eq!(events.lines().filter(|l| l.trim_start_matches('\u{feff}') == "menu save").count(), 1, "Save reached the window once, and Print… didn't: {events}");
+
     // Window commands, as the bar's long-press menu sends them.
     for action in ["fullScreen", "minimize", "close"] {
         let c = serde_json::to_vec(&serde_json::json!({"id": id, "action": action})).unwrap();

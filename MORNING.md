@@ -57,6 +57,13 @@ Do these in any order. Tell me which ones work.
 - **Gestures:** swipe up with three fingers on the trackpad area. Windows' Task View should open.
 - **Quality:** in the iPad's Settings, change the quality. The picture should blink and come back.
 
+- **Menus:** on the PC, right-click the Start button and choose **Device Manager**. On the iPad, tap
+  **Apps**, pick Device Manager's window, then tap **Menus** in Sill's bar. You should see File, Action,
+  View and Help. Tap **View**, then **Devices by connection**. The list on the PC should change.
+- **USB cable (optional):** install **Apple Devices** from the Microsoft Store on the PC, plug the iPad
+  into the PC, and tap **Trust** if the iPad asks. Then look at Sill's list of computers on the iPad.
+  If your PC says **Wired** under its name, the cable works. If it doesn't, that's fine, just tell me.
+
 ## 6. Tell me how it went
 
 Tell me which steps worked. If they all did, tell me whether it felt smooth or laggy.

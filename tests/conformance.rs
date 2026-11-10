@@ -166,6 +166,10 @@ fn device_messages_decode() {
     assert_eq!(from_device(split(&swift("clipboard_sub.bin")).1), Ask::Subscribe);
     assert_eq!(from_device(split(&swift("clipboard_text.bin")).1), Ask::Set("Hé".into()));
     assert_eq!(from_device(split(&swift("clipboard_stop.bin")).1), Ask::Stop);
+    let ask = |name: &str| -> (u8, p::MenuAsk) { let m = swift(name); let (h, b) = split(&m); (h.kind, serde_json::from_slice(b).unwrap()) };
+    assert_eq!(ask("fetch_menu_top.bin"), (kind::FETCH_MENU, p::MenuAsk { token: Some(1), ..Default::default() }), "the menus' subscription");
+    assert_eq!(ask("fetch_menu.bin"), (kind::FETCH_MENU, p::MenuAsk { version: Some(3), id: Some("0".into()), title: Some("File".into()), token: Some(2) }), "a fetch");
+    assert_eq!(ask("press_menu.bin"), (kind::PRESS_MENU_ITEM, p::MenuAsk { version: Some(3), id: Some("0.0".into()), title: Some("Save".into()), token: Some(3) }), "a press");
     assert_eq!(decode::<p::LaunchApp>("launch_app.bin", kind::LAUNCH_APP).bundle_id, "C:\\apps\\calc.lnk");
     let c: p::WindowCommand = decode("window_command.bin", kind::WINDOW_COMMAND);
     assert_eq!((c.id, c.action.as_str()), (77, "fullScreen"));
@@ -266,6 +270,20 @@ fn write_rust_fixtures() {
     w("audio_tone.packets", packets);
     w("audio_format.bin", sill_windows::audio::format_message(7, &eld.cookie, eld.priming));
     w("audio_packet.bin", sill_windows::audio::packet_message(7, 9, true, &packet, TS));
+    }
+    {
+        use sill_windows::menus::{platform, refusal, State, CHANGED};
+        std::env::set_var("SILL_TEST_MENUS", "1");
+        let mut state = State::default();
+        state.update(None);
+        state.update(None);
+        state.version = 2;
+        state.update(platform::bar(101));
+        w("menu_top.bin", json(kind::MAC_MENU, &state.top_level(Some(1))));
+        let (items, _) = sill_windows::menus::items(&[0], &platform::items(101, &[0], "File").unwrap());
+        w("menu_items.bin", json(kind::MAC_MENU, &p::MacMenu { version: Some(3), answering: Some(2), menu: Some("0".into()), items: Some(items), ..Default::default() }));
+        w("menu_pressed.bin", json(kind::MAC_MENU, &p::MacMenu { version: Some(3), answering: Some(3), pressed: Some(true), ..Default::default() }));
+        w("menu_refused.bin", json(kind::MAC_MENU, &refusal(4, Some(4), None, Some(false), CHANGED)));
     }
     w("clipboard_out.bin", json(kind::CLIPBOARD, &p::Clipboard { text: Some("Hé".into()), stop: None }));
     // Signed as the host signs it, through the real identity code.

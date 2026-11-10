@@ -52,6 +52,8 @@ struct Client {
     audio_epoch: Option<u16>,
     /// The rate its panel wants.
     fps: i64,
+    /// It asked for the menus (a kind 27 without an id).
+    menus: bool,
 }
 
 /// What a device may change, and only to Sill's own choices. Kept in `settings.json`.
@@ -144,6 +146,8 @@ pub struct Hub {
     pub launching: Mutex<Option<(f64, Vec<u32>)>>,
     /// Why no sound comes although Send Audio is on.
     pub audio_note: Mutex<Option<String>>,
+    /// The menus the devices see (menus.rs).
+    pub menus: Mutex<crate::menus::State>,
     cursor: Mutex<Option<Arc<Vec<u8>>>>,
     last_pointer: Mutex<Option<Option<(f64, f64)>>>,
 }
@@ -238,7 +242,7 @@ impl Hub {
 
     fn register(&self, tx: mpsc::UnboundedSender<Out>, in_flight: Arc<AtomicUsize>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        self.clients.lock().unwrap().insert(id, Client { tx, in_flight, needs_keyframe: true, clipboard: false, inputs: 0, moved_at: 0.0, audio: false, audio_epoch: None, fps: 60 });
+        self.clients.lock().unwrap().insert(id, Client { tx, in_flight, needs_keyframe: true, clipboard: false, inputs: 0, moved_at: 0.0, audio: false, audio_epoch: None, fps: 60, menus: false });
         self.request_keyframe();
         id
     }
@@ -294,6 +298,75 @@ impl Hub {
             if c.clipboard && Some(*id) != except {
                 let _ = c.tx.send(Out { data: m.clone(), frame: false });
             }
+        }
+    }
+
+    pub fn has_menu_subscribers(&self) -> bool {
+        self.clients.lock().unwrap().values().any(|c| c.menus)
+    }
+
+    fn subscribed_to_menus(&self, id: u64) -> bool {
+        self.clients.lock().unwrap().get(&id).is_some_and(|c| c.menus)
+    }
+
+    /// Reads the menu bar again: of the streamed window, else of the one in front (while that is
+    /// one of this program's own, what was there stays). A changed tree goes to every subscriber.
+    pub fn refresh_menus(&self) -> bool {
+        use crate::menus::platform;
+        let bar = if self.locked.load(Ordering::SeqCst) {
+            None
+        } else {
+            // Extra monitors are listed from 0xFFFF_0000 up; they have no menus of their own.
+            let window = match *self.source.lock().unwrap() {
+                p::StreamSource::Window { id } if id < 0xFFFF_0000 => Some(id),
+                _ => platform::foreground(),
+            };
+            match window {
+                Some(w) => platform::bar(w),
+                None => return false,
+            }
+        };
+        let (changed, top) = {
+            let mut s = self.menus.lock().unwrap();
+            let changed = s.update(bar);
+            (changed, s.top_level(None))
+        };
+        if changed {
+            let m = Arc::new(p::json_message(kind::MAC_MENU, &top));
+            for c in self.clients.lock().unwrap().values().filter(|c| c.menus) {
+                let _ = c.tx.send(Out { data: m.clone(), frame: false });
+            }
+        }
+        changed
+    }
+
+    /// The answer to a kind 27 (with an id) or a kind 25.
+    fn menu_answer(&self, client: u64, ask: &p::MenuAsk, press: bool) -> p::MacMenu {
+        use crate::menus::{self, platform, CHANGED};
+        let (version, bar) = {
+            let s = self.menus.lock().unwrap();
+            (s.version, s.current(ask.version).cloned())
+        };
+        let menu = (!press).then(|| ask.id.clone()).flatten();
+        let pressed = press.then_some(false);
+        if self.locked.load(Ordering::SeqCst) {
+            return menus::refusal(version, ask.token, menu, pressed, menus::LOCKED);
+        }
+        let path = ask.id.as_deref().and_then(menus::parse_id);
+        let (true, Some(bar), Some(path), Some(title)) = (self.subscribed_to_menus(client), bar, path, ask.title.as_deref()) else {
+            return menus::refusal(version, ask.token, menu, pressed, CHANGED);
+        };
+        let done = if press {
+            platform::press(bar.window, &path, title).map(|_| p::MacMenu { pressed: Some(true), ..Default::default() })
+        } else {
+            platform::items(bar.window, &path, title).map(|nodes| {
+                let (items, more) = menus::items(&path, &nodes);
+                p::MacMenu { menu: menu.clone(), items: Some(items), more: (more > 0).then_some(more as i64), ..Default::default() }
+            })
+        };
+        match done {
+            Ok(m) => p::MacMenu { version: Some(version), answering: ask.token, ..m },
+            Err(note) => menus::refusal(version, ask.token, menu, pressed, &note),
         }
     }
 
@@ -659,6 +732,9 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
                     }
                     if host.hub.set_source(source) {
                         host.hub.send_all(host.window_list());
+                        if host.hub.has_menu_subscribers() {
+                            host.hub.refresh_menus();
+                        }
                         continue;
                     }
                 }
@@ -749,6 +825,20 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
                     _ => {} // past the rate: nothing taken
                 }
             }
+            kind::FETCH_MENU | kind::PRESS_MENU_ITEM => {
+                let Ok(ask) = serde_json::from_slice::<p::MenuAsk>(&payload) else { continue };
+                let answer = if h.kind == kind::FETCH_MENU && ask.id.is_none() {
+                    // The subscription: the top level now, and every later one.
+                    if let Some(c) = host.hub.clients.lock().unwrap().get_mut(&id) {
+                        c.menus = true;
+                    }
+                    host.hub.refresh_menus();
+                    host.hub.menus.lock().unwrap().top_level(ask.token)
+                } else {
+                    host.hub.menu_answer(id, &ask, h.kind == kind::PRESS_MENU_ITEM)
+                };
+                host.hub.send(id, p::json_message(kind::MAC_MENU, &answer));
+            }
             kind::KEYFRAME_REQUEST => {
                 let now = p::now();
                 if now - last_keyframe_request >= 1.0 {
@@ -765,7 +855,7 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(host: Arc<H
                     }
                 }
             }
-            _ => {} // viewport, menus, clipboard…: not in v0.1; unknown kinds are skipped
+            _ => {} // unknown kinds are skipped
         }
     };
     host.hub.unregister(id);

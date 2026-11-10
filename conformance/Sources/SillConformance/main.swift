@@ -104,6 +104,9 @@ func dump(_ dir: URL) throws {
     try write("clipboard_sub.bin", message(.clipboard, Wire.encode(Clipboard())))
     try write("clipboard_text.bin", message(.clipboard, Wire.encode(Clipboard(text: "Hé"))))
     try write("clipboard_stop.bin", message(.clipboard, Wire.encode(Clipboard(stop: true))))
+    try write("fetch_menu_top.bin", message(.fetchMenu, Wire.encode(FetchMenu(token: 1))))
+    try write("fetch_menu.bin", message(.fetchMenu, Wire.encode(FetchMenu(version: 3, id: "0", title: "File", token: 2))))
+    try write("press_menu.bin", message(.pressMenuItem, Wire.encode(PressMenuItem(version: 3, id: "0.0", title: "Save", token: 3))))
     try write("launch_app.bin", message(.launchApp, Wire.encode(LaunchApp(bundleID: "C:\\apps\\calc.lnk"))))
     try write("window_command.bin", message(.windowCommand, Wire.encode(WindowCommand(id: 77, action: .fullScreen))))
     try write("viewport_scaled.bin", message(.viewport, Wire.encode(Viewport(width: 1180, height: 820, scale: 1.25))))
@@ -209,6 +212,27 @@ func check(_ dir: URL) throws {
     if let (_, p) = load("pointer_off.bin") {
         let m = Wire.decode(MacPointer.self, from: p)
         expect(m?.inside == false && m?.position == nil && m?.seen == 12, "pointer_off.bin")
+    }
+    if let (h, p) = load("menu_top.bin") {
+        let m = Wire.decode(MacMenu.self, from: p)
+        expect(h.kind == .macMenu && m?.version == 3 && m?.answering == 1 && m?.app == "Word" && m?.bundleID == "C:\\apps\\word.exe"
+               && m?.menus?.first?.id == "0" && m?.menus?.first?.title == "File" && m?.menus?.first?.submenu == true,
+               "menu_top.bin decodes as MacMenu's top level: \(String(data: p, encoding: .utf8) ?? "")")
+    }
+    if let (h, p) = load("menu_items.bin") {
+        let m = Wire.decode(MacMenu.self, from: p)
+        let i = m?.items ?? []
+        expect(h.kind == .macMenu && m?.menu == "0" && i.count == 4 && i[0].key == "⌘S" && i[1].separator == true
+               && i[2].enabled == false && i[3].mark == "✓" && i[3].id == "0.3",
+               "menu_items.bin decodes as one menu's items: \(String(data: p, encoding: .utf8) ?? "")")
+    }
+    if let (h, p) = load("menu_pressed.bin") {
+        let m = Wire.decode(MacMenu.self, from: p)
+        expect(h.kind == .macMenu && m?.pressed == true && m?.answering == 3, "menu_pressed.bin")
+    }
+    if let (h, p) = load("menu_refused.bin") {
+        let m = Wire.decode(MacMenu.self, from: p)
+        expect(h.kind == .macMenu && m?.pressed == false && m?.note == "The menus changed. Open the menu again.", "menu_refused.bin")
     }
     if let (h, p) = load("clipboard_out.bin") {
         expect(h.kind == .clipboard && Wire.decode(Clipboard.self, from: p)?.text == "Hé", "clipboard_out.bin")

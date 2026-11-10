@@ -10,6 +10,7 @@ pub mod identity;
 pub mod input;
 pub mod log;
 pub mod mdns;
+pub mod menus;
 pub mod net;
 pub mod pair_window;
 pub mod pairing;

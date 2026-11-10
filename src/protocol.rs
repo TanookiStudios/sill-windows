@@ -36,7 +36,10 @@ pub mod kind {
     pub const PAIR_RESULT: u8 = 20;
     pub const GOODBYE: u8 = 22;
     pub const HELLO: u8 = 23;
+    pub const MAC_MENU: u8 = 24;
+    pub const PRESS_MENU_ITEM: u8 = 25;
     pub const MAC_POINTER: u8 = 26;
+    pub const FETCH_MENU: u8 = 27;
     pub const GESTURE: u8 = 28;
     pub const CLIPBOARD: u8 = 32;
     pub const AUDIO: u8 = 43;
@@ -365,6 +368,61 @@ pub struct MacPointer {
 #[derive(Debug, Clone, Deserialize)]
 pub struct TrackpadGesture {
     pub gesture: String,
+}
+
+/// Kind 24 (MacMenu.swift): a top level, one menu's items, or the answer to a press.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacMenu {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    #[serde(rename = "bundleID", skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub menus: Option<Vec<MacMenuItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answering: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub menu: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<Vec<MacMenuItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub more: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pressed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MacMenuItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub separator: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mark: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submenu: Option<bool>,
+}
+
+/// Kind 27 (a fetch) and kind 25 (a press), device to host: the same four fields.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct MenuAsk {
+    pub version: Option<i64>,
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub token: Option<i64>,
 }
 
 /// Kind 32, both ways: every field optional, left out when nil.

@@ -61,6 +61,16 @@ unsafe fn program(h: HWND) -> Option<String> {
     Some(String::from_utf16_lossy(&b[..n as usize]))
 }
 
+/// The program that owns a window, by its full path.
+pub fn program_path(id: u32) -> Option<String> {
+    unsafe { program(hwnd(id)) }
+}
+
+/// What a program calls itself, for the menus' app name.
+pub fn name_of(path: &str) -> String {
+    app_name(path).unwrap_or_else(|| "This app".into())
+}
+
 /// The name a program gives itself ("Google Chrome"), else its file's name, capitalized.
 fn app_name(path: &str) -> Option<String> {
     use windows::Win32::Storage::FileSystem::*;
