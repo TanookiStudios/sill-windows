@@ -272,15 +272,16 @@ fn write_rust_fixtures() {
     w("audio_packet.bin", sill_windows::audio::packet_message(7, 9, true, &packet, TS));
     }
     {
-        use sill_windows::menus::{platform, refusal, State, CHANGED};
-        std::env::set_var("SILL_TEST_MENUS", "1");
+        use sill_windows::menus::{refusal, Bar, Node, State, CHANGED};
+        // Sample menus, the same on every system (the real reader is tests/end_to_end.rs's on Windows).
+        let n = |t: &str, key: Option<&str>, enabled: bool, mark: bool, submenu: bool| Node { title: t.into(), key: key.map(Into::into), enabled, mark, separator: false, submenu };
+        let file = vec![n("Save", Some("⌘S"), true, false, false), Node { separator: true, ..n("", None, true, false, false) }, n("Print…", None, false, false, false), n("Autosave", None, true, true, false)];
         let mut state = State::default();
         state.update(None);
-        state.update(None);
         state.version = 2;
-        state.update(platform::bar(101));
+        state.update(Some(Bar { window: 101, app: "Word".into(), path: "C:\\apps\\word.exe".into(), top: vec![n("File", None, true, false, true), n("Edit", None, true, false, true)], stale: false }));
         w("menu_top.bin", json(kind::MAC_MENU, &state.top_level(Some(1))));
-        let (items, _) = sill_windows::menus::items(&[0], &platform::items(101, &[0], "File").unwrap());
+        let (items, _) = sill_windows::menus::items(&[0], &file);
         w("menu_items.bin", json(kind::MAC_MENU, &p::MacMenu { version: Some(3), answering: Some(2), menu: Some("0".into()), items: Some(items), ..Default::default() }));
         w("menu_pressed.bin", json(kind::MAC_MENU, &p::MacMenu { version: Some(3), answering: Some(3), pressed: Some(true), ..Default::default() }));
         w("menu_refused.bin", json(kind::MAC_MENU, &refusal(4, Some(4), None, Some(false), CHANGED)));
