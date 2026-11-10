@@ -219,6 +219,8 @@ pub mod platform {
             }
             let (title, key) = label(&text);
             let state = info.fState.0;
+            // GetSubMenu is the dependable way to learn an item opens a menu.
+            let sub = GetSubMenu(menu, i as i32);
             out.push((
                 Node {
                     title,
@@ -226,10 +228,10 @@ pub mod platform {
                     enabled: state & (MFS_DISABLED.0 | MFS_GRAYED.0) == 0,
                     mark: state & MFS_CHECKED.0 != 0,
                     separator,
-                    submenu: !info.hSubMenu.0.is_null(),
+                    submenu: !sub.0.is_null(),
                 },
                 info.wID,
-                info.hSubMenu,
+                sub,
             ));
         }
         out

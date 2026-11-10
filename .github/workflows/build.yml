@@ -28,8 +28,8 @@ jobs:
           $out = & target\release\SillHost.exe --help
           if ($LASTEXITCODE -ne 0 -or -not ($out -match "SillHost")) { throw "SillHost.exe --help failed" }
           $out
-      - name: Real clicks and typing on this machine's desktop
-        continue-on-error: true
+      - name: Real clicks, typing and menus on this machine's desktop
+        # Allowed to fail the build: it passes on GitHub's runner, and a failure here is a real one.
         env:
           SILL_E2E_INPUT: "1"
           SILL_E2E_NO_VIDEO: "1"
